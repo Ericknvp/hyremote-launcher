@@ -51,6 +51,12 @@ import java.util.Map;
 public class BluetoothPanel extends Dialog {
 
     private static final String TAG = "HyRemoteBt";
+
+    /** Los extras del emparejamiento no son API publica: van por su nombre. */
+    private static final String EXTRA_ADDRESS = "android.bluetooth.device.extra.ADDRESS";
+    private static final String EXTRA_TYPE = "android.bluetooth.device.extra.TYPE";
+    private static final String VARIANT_ASK = "PAIRING_VARIANT_ASK";
+    private static final String VARIANT_PIN = "PAIRING_VARIANT_PIN";
     private static final int REQ_PERMS = 7;
 
     private final Activity activity;
@@ -712,16 +718,38 @@ public class BluetoothPanel extends Dialog {
         }
     }
 
-    /** Hands the device to the system pairing dialog. */
+    /**
+     * Empareja un dispositivo.
+     *
+     * El dialogo de emparejamiento de Android TV exige un extra de tipo: sin
+     * el se niega a abrirse ('Incorrect pairing type received, not showing
+     * any dialog') y el usuario ve que no pasa nada. El extra no es API
+     * publica, asi que va por su nombre.
+     *
+     * Se prueban las dos variantes (ASK para los parlantes modernos, PIN para
+     * los que muestran un numero) y, si el dialogo no se puede lanzar, se
+     * intenta createBond().
+     */
     private void pair(BluetoothDevice d) {
+        for (String variant : new String[]{VARIANT_ASK, VARIANT_PIN}) {
+            try {
+                Intent i = new Intent(BluetoothDevice.ACTION_PAIRING_REQUEST);
+                i.putExtra(EXTRA_ADDRESS, d.getAddress());
+                i.putExtra(BluetoothDevice.EXTRA_NAME, deviceName(d));
+                i.putExtra(EXTRA_TYPE, variant);
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                activity.startActivity(i);
+                return;
+            } catch (Exception ignored) {
+            }
+        }
         try {
-            Intent i = new Intent(BluetoothDevice.ACTION_PAIRING_REQUEST);
-            i.putExtra("android.bluetooth.device.extra.ADDRESS", d.getAddress());
-            i.putExtra(BluetoothDevice.EXTRA_NAME, deviceName(d));
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            activity.startActivity(i);
-            return;
-        } catch (Exception ignored) {
+            if (d.createBond()) {
+                toast("Emparejando con " + deviceName(d) + "…");
+                return;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "createBond: " + e);
         }
         try {
             Intent i = new Intent();
