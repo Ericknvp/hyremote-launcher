@@ -1,0 +1,38 @@
+# HyRemote bridge - the projector's HTTP remote-control server.
+#
+# Installed to /system/etc/init/hyremote.rc by setup.ps1. Requires `adb remount`
+# first, and survives reboots because it lives in the system image.
+#
+# Why root: the bridge shells out to `input keyevent`, `dumpsys` and `monkey`,
+# and all three are refused for an ordinary app uid on Android 13. Running as
+# root is what makes the control actually press buttons - an app-uid bridge
+# answers every request with {"ok":1} while nothing happens on screen.
+#
+# Why class main: it starts as soon as init reaches the main class, well before
+# BOOT_COMPLETED, so the port is live long before the launcher appears. That is
+# what removes the multi-second "wait for the server" delay after power-on.
+#
+# No `oneshot` on purpose: init restarts the service if it ever exits, which
+# makes the bridge self-healing without a watchdog in the app.
+
+service hyremote /system/bin/sh /system/etc/hyremote/boot.sh
+    class main
+    user root
+    group root shell
+
+# Brings the launcher up at boot.
+#
+# The app's own BOOT_COMPLETED receiver is not enough: Android 12+ freezes
+# background apps, and a frozen app never receives the boot broadcast (it is
+# deferred). The vendor launcher takes the screen at boot, so HyRemote would
+# stay frozen and the projector would sit on the vendor splash until someone
+# pressed HOME. Starting the activity from init thaws it.
+#
+# class late_start so it never delays the boot, and oneshot so the launcher is
+# not brought to the front again on every restart of the service.
+
+service hyremote-launcher /system/bin/sh /system/etc/hyremote/launch.sh
+    class late_start
+    user root
+    group root shell
+    oneshot

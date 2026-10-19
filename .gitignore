@@ -1,0 +1,22 @@
+# Carpeta de trabajo del build (se regenera con build.ps1)
+build/
+
+# Node
+node_modules/
+
+# La clave de firma NO va al repo: con ella cualquiera podria firmar un APK
+# "oficial" de HyRemote y Android lo aceptaria como actualizacion sobre el
+# telefono de tu primo. Guardala en privado y copiala aqui cuando firmes:
+#   copy <tu-ruta>\hyremote.keystore .\
+hyremote.keystore
+*.keystore
+
+# Firma de v4 (se regenera con apksigner)
+*.idsig
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Carpeta de la herramienta de diseño, no es parte del proyecto
+.impeccable/
