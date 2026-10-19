@@ -71,10 +71,19 @@ Adb root | Out-Null
 Start-Sleep -Seconds 2
 Adb wait-for-device
 
-Write-Host "[2/5] making /system writable" -ForegroundColor Cyan
-$out = Adb remount 2>&1
-if ("$out" -notmatch "remount succeeded") {
-    throw "adb remount failed: $out`nRequires a userdebug build (this one is: ro.build.type=$(Adb shell getprop ro.build.type))"
+Write-Host "[2/5] haciendo /system escribible" -ForegroundColor Cyan
+# OJO: en este firmware `adb remount` RECREA el overlay de /system y borra
+# todo lo que se hubiera escrito ahi (el bridge, el .rc de init...). Por eso
+# solo se hace remount si /system todavia no es escribible: si ya lo es, el
+# remount solo serviria para tirar el bridge a la basura.
+$sysMount = (& $ADB -s $Device shell "mount | grep ' /system '") -join ""
+if ($sysMount -match "\(rw") {
+    Write-Host "      /system ya es escribible: no hace falta remount" -ForegroundColor DarkGray
+} else {
+    $out = Adb remount 2>&1
+    if ("$out" -notmatch "remount succeeded") {
+        throw "adb remount failed: $out`nRequires a userdebug build (this one is: ro.build.type=$(Adb shell getprop ro.build.type))"
+    }
 }
 Adb shell "mkdir -p $SYS/www"
 
@@ -100,4 +109,9 @@ Start-Sleep -Seconds 1
 Adb shell "start hyremote" | Out-Null
 Write-Host "      bridge restarted (no reboot needed)" -ForegroundColor Green
 
-Write-Host "`nDone. Bridge is served by init as root on port 8080." -ForegroundColor Green
+$check = Adb shell "ls $SYS/handler.sh /system/etc/init/hyremote.rc 2>&1"
+if ("$check" -match "No such file") {
+    Write-Host "AVISO: el bridge no quedo en /system. Vuelve a ejecutar setup.ps1." -ForegroundColor Yellow
+} else {
+    Write-Host "`nDone. Bridge is served by init as root on port 8080." -ForegroundColor Green
+}
