@@ -57,6 +57,12 @@ public class BluetoothPanel extends Dialog {
     private static final String EXTRA_TYPE = "android.bluetooth.device.extra.TYPE";
     private static final String VARIANT_ASK = "PAIRING_VARIANT_ASK";
     private static final String VARIANT_PIN = "PAIRING_VARIANT_PIN";
+
+    // El motivo del fallo del emparejamiento tampoco es API publica.
+    private static final String EXTRA_REASON = "android.bluetooth.device.extra.REASON";
+    private static final int FAIL_FAILED = 1;
+    private static final int FAIL_PIN_REQUIRED = 2;
+    private static final int FAIL_AUTH_FAILED = 3;
     private static final int REQ_PERMS = 7;
 
     private final Activity activity;
@@ -85,6 +91,29 @@ public class BluetoothPanel extends Dialog {
         public void run() {
             refreshStates();
             handler.postDelayed(this, 800);
+        }
+    };
+
+    /** Avisa del resultado del emparejamiento, que si no parece no hacer nada. */
+    private final BroadcastReceiver bondReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            BluetoothDevice d = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+            int state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE,
+                    BluetoothDevice.ERROR);
+            if (d == null) return;
+            if (state == BluetoothDevice.BOND_BONDED) {
+                toast("Emparejado con " + deviceName(d));
+            } else if (state == BluetoothDevice.BOND_NONE
+                    && intent.hasExtra(EXTRA_REASON)) {
+                int reason = intent.getIntExtra(EXTRA_REASON, 0);
+                if (reason == FAIL_FAILED || reason == FAIL_PIN_REQUIRED
+                        || reason == FAIL_AUTH_FAILED) {
+                    toast("No se pudo emparejar con " + deviceName(d));
+                }
+            }
+            loadBonded();
+            render();
         }
     };
 
@@ -227,6 +256,10 @@ public class BluetoothPanel extends Dialog {
                     activity.unregisterReceiver(receiver);
                 } catch (Exception ignored) {
                 }
+                try {
+                    activity.unregisterReceiver(bondReceiver);
+                } catch (Exception ignored) {
+                }
             }
         });
     }
@@ -242,6 +275,10 @@ public class BluetoothPanel extends Dialog {
             filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
             filter.addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
             activity.registerReceiver(receiver, filter);
+
+            IntentFilter bond = new IntentFilter();
+            bond.addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
+            activity.registerReceiver(bondReceiver, bond);
         } catch (Exception ignored) {
         }
         ensurePermissions();
