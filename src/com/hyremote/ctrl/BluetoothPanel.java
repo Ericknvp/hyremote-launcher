@@ -57,6 +57,8 @@ public class BluetoothPanel extends Dialog {
     private final BluetoothAdapter adapter;
     private final int bridgePort;
     private final Map<String, String> found = new LinkedHashMap<>(); // address -> name
+    /** Los dispositivos vistos en el escaneo: todavia no estan emparejados. */
+    private final Map<String, BluetoothDevice> foundDevices = new HashMap<>();
     private final List<BluetoothDevice> bonded = new ArrayList<>();
 
     // Live references, so the panel can refresh itself without rebuilding the
@@ -88,6 +90,7 @@ public class BluetoothPanel extends Dialog {
                 BluetoothDevice d = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
                 if (d == null) return;
                 found.put(d.getAddress(), deviceName(d));
+                foundDevices.put(d.getAddress(), d);
                 render();
             } else if (BluetoothAdapter.ACTION_DISCOVERY_FINISHED.equals(action)) {
                 scanning = false;
@@ -362,6 +365,7 @@ public class BluetoothPanel extends Dialog {
         try {
             if (adapter.isDiscovering()) adapter.cancelDiscovery();
             found.clear();
+            foundDevices.clear();
             scanning = adapter.startDiscovery();
             if (!scanning) {
                 toast("No se pudo buscar");
@@ -550,20 +554,31 @@ public class BluetoothPanel extends Dialog {
             @Override
             public void run() {
                 BluetoothDevice dev = findDevice(address);
-                if (dev == null) return;
+                if (dev == null) {
+                    toast("No se pudo localizar el dispositivo. Busca otra vez.");
+                    return;
+                }
                 pair(dev);
             }
         }));
         return row;
     }
 
+    /**
+     * Busca un dispositivo por su direccion, primero entre los que acaba el
+     * escaneo (que todavia no estan emparejados) y luego entre los
+     * emparejados. Antes solo miraba estos ultimos, y por eso pulsar
+     * 'Emparejar' en un dispositivo nuevo no hacia absolutamente nada.
+     */
     private BluetoothDevice findDevice(String address) {
+        BluetoothDevice d = foundDevices.get(address);
+        if (d != null) return d;
         try {
             if (adapter == null) return null;
             java.util.Set<BluetoothDevice> set = adapter.getBondedDevices();
             if (set != null) {
-                for (BluetoothDevice d : set) {
-                    if (d.getAddress().equals(address)) return d;
+                for (BluetoothDevice b : set) {
+                    if (b.getAddress().equals(address)) return b;
                 }
             }
         } catch (Exception ignored) {
