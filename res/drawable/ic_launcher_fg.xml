@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Foreground layer of the adaptive icon: the brand disc, inset so it
+     survives the system's circular mask on every launcher. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <inset
+            android:drawable="@drawable/logo_mark"
+            android:insetLeft="18%"
+            android:insetRight="18%"
+            android:insetTop="18%"
+            android:insetBottom="18%" />
+    </item>
+</layer-list>
