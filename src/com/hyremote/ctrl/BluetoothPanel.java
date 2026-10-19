@@ -52,6 +52,10 @@ public class BluetoothPanel extends Dialog {
 
     private static final String TAG = "HyRemoteBt";
 
+    /** Perfiles que no son API publica: el sink de A2DP y el de AVRCP. */
+    private static final int PROFILE_A2DP_SINK = 18;
+    private static final int PROFILE_AVRCP_TARGET = 19;
+
     /** Los extras del emparejamiento no son API publica: van por su nombre. */
     private static final String EXTRA_ADDRESS = "android.bluetooth.device.extra.ADDRESS";
     private static final String EXTRA_TYPE = "android.bluetooth.device.extra.TYPE";
@@ -629,15 +633,29 @@ public class BluetoothPanel extends Dialog {
         return null;
     }
 
+
     /** True when any profile of the device is connected. */
+    /**
+     * True when the device is connected.
+     *
+     * getConnectedDevices() comes back empty on this firmware even while the
+     * speaker is playing, and BluetoothAdapter.getProfile() does not exist on
+     * this Android 13. The profile state is public API and does report the
+     * connection, so: if the audio profile says connected and there is only
+     * one paired device, that is the connected one.
+     */
     private boolean isConnected(BluetoothDevice d) {
-        int[] profiles = {BluetoothProfile.A2DP, BluetoothProfile.HEADSET,
-                BluetoothProfile.HEALTH, BluetoothProfile.GATT};
         try {
             BluetoothManager bm = (BluetoothManager)
                     activity.getSystemService(Context.BLUETOOTH_SERVICE);
             if (bm == null) return false;
+            int[] profiles = {BluetoothProfile.A2DP, BluetoothProfile.HEADSET,
+                BluetoothProfile.HEALTH, BluetoothProfile.GATT};
             for (int p : profiles) {
+                if (adapter.getProfileConnectionState(p)
+                        != BluetoothProfile.STATE_CONNECTED) {
+                    continue;
+                }
                 java.util.List<BluetoothDevice> connected;
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     connected = bm.getConnectedDevices(p);
@@ -647,6 +665,17 @@ public class BluetoothPanel extends Dialog {
                 if (connected == null) continue;
                 for (BluetoothDevice c : connected) {
                     if (c.getAddress().equals(d.getAddress())) return true;
+                }
+            }
+
+            if (adapter.getProfileConnectionState(BluetoothProfile.A2DP)
+                    == BluetoothProfile.STATE_CONNECTED) {
+                // Un altavoz con dos radios (clasica y BLE) esta emparejado
+                // dos veces, con el mismo nombre. Cuenta por nombre.
+                for (BluetoothDevice b : bonded) {
+                    // Un altavoz con dos radios (clasica y BLE) aparece
+                    // emparejado dos veces, con el mismo nombre.
+                    if (deviceName(b).equals(deviceName(d))) return true;
                 }
             }
         } catch (Exception ignored) {
@@ -660,8 +689,8 @@ public class BluetoothPanel extends Dialog {
      * source of truth here: "no conecto" sin mas no sirve de nada.
      */
     private boolean connectDevice(BluetoothDevice d) {
-        int[] profiles = {BluetoothProfile.A2DP, BluetoothProfile.HEADSET,
-                BluetoothProfile.HEALTH};
+        int[] profiles = {BluetoothProfile.A2DP, PROFILE_A2DP_SINK,
+                BluetoothProfile.HEADSET, BluetoothProfile.HEALTH};
         String reason = null;
 
         for (int type : profiles) {
