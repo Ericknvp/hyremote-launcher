@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HyRemote</string>
+    <string name="acc_description">HyRemote necesita accesibilidad para inyectar las teclas del control remoto en el proyector.</string>
+</resources>
