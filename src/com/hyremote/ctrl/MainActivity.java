@@ -129,11 +129,18 @@ public class MainActivity extends Activity {
     // Decoding a launcher icon costs real time on this SoC, and the app column
     // is rebuilt every time the launcher resumes. These keep the work of one
     // decode for the life of the process.
-    private final Map<String, android.graphics.drawable.Drawable> iconCache = new HashMap<>();
-    private final Map<String, String> labelCache = new HashMap<>();
+    private final Map<String, android.graphics.drawable.Drawable> iconCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<String, String> labelCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
     private Map<String, Integer> usageCache;
     private long usageCacheAt;
     private long recencyCacheAt;
+
+    // The app list is loaded once, off the main thread, and rebuilt from this
+    // snapshot every time the launcher resumes.
+    private volatile List<ResolveInfo> appList;
+    private volatile boolean appListLoading = false;
 
     private LinearLayout appsColumn;
     private String lastForegroundPkg;
@@ -441,8 +448,8 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         handler.post(ticker);
-        publishAppList();
         refreshApps();
+        if (appList != null) publishAppListAsync();
         checkHomeResult();
         // Do not wait two seconds for the first poll: a new user may already
         // be pointing the phone at the screen.
@@ -452,10 +459,43 @@ public class MainActivity extends Activity {
     /** Rebuilds the app sections with the current recency order. */
     private void refreshApps() {
         if (appsColumn == null) return;
+        // A copy: the background thread that publishes the app list for the
+        // phone may be reading the current snapshot.
+        if (appList != null) appList = sortApps(new ArrayList<>(appList));
         View focused = appsColumn.findFocus();
         Object focusTag = focused == null ? null : focused.getTag();
         fillAppsColumn(appsColumn);
         if (focusTag != null) restoreFocus(appsColumn, focusTag);
+    }
+
+    /** Loads (or reloads) the app list without touching the main thread. */
+    private void loadAppsAsync() {
+        if (appListLoading) return;
+        appListLoading = true;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final List<ResolveInfo> apps = queryApps();
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        appListLoading = false;
+                        appList = apps;
+                        fillAppsColumn(appsColumn);
+                    }
+                });
+                // The bridge hands the same list to the phone, so it is
+                // published from the same background pass.
+                publishAppList();
+            }
+        }, "load-apps").start();
+    }
+
+    /** Forgets the cache: an app was hidden or uninstalled. */
+    private void reloadApps() {
+        appList = null;
+        if (appListLoading) return;
+        loadAppsAsync();
     }
 
     /** Gives the focus back to the tile that had it, after a rebuild. */
@@ -744,16 +784,34 @@ public class MainActivity extends Activity {
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
         appsColumn = col;
+
+        // The first frame must not wait for the package scan. The column is
+        // built empty and filled when the list arrives from a background
+        // thread; on this SoC the scan plus forty icon decodes is the single
+        // most expensive thing the launcher does.
         fillAppsColumn(col);
+        loadAppsAsync();
         return col;
     }
 
     /** Builds the two sections: the recent apps on top, the rest below. */
     private void fillAppsColumn(LinearLayout col) {
+        if (col == null) return;
         col.removeAllViews();
 
+        List<ResolveInfo> all = appList;
+        if (all == null) {
+            TextView loading = text("Cargando aplicaciones…", T_BODY, INK_DIM,
+                    Typeface.NORMAL);
+            loading.setGravity(Gravity.CENTER);
+            col.addView(loading, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT));
+            if (!appListLoading) loadAppsAsync();
+            return;
+        }
+
         // ---- RECIENTES: the apps opened lately, bigger, on their own row
-        List<ResolveInfo> all = loadApps();
         List<ResolveInfo> recent = new ArrayList<>();
         List<ResolveInfo> rest = new ArrayList<>();
         splitRecent(all, recent, rest);
@@ -946,7 +1004,8 @@ public class MainActivity extends Activity {
      * alphabetical list. Apps that were never opened keep the alphabetical
      * order below them.
      */
-    private List<ResolveInfo> loadApps() {
+    /** The installed launcher activities. Heavy: background threads only. */
+    private List<ResolveInfo> queryApps() {
         List<ResolveInfo> resolved = getPackageManager().queryIntentActivities(
                 new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0);
 
@@ -958,10 +1017,15 @@ public class MainActivity extends Activity {
             if (seen.add(ri.activityInfo.packageName)) apps.add(ri);
         }
 
-        final Map<String, Long> recency = readRecency();
-        recencyMap = recency;
-        final Map<String, Integer> usage = readUsageStats();
+        recencyMap = readRecency();
+        readUsageStats();
+        return sortApps(apps);
+    }
 
+    /** Orders a list by recency, then usage, then name. */
+    private List<ResolveInfo> sortApps(List<ResolveInfo> apps) {
+        final Map<String, Long> recency = readRecency();
+        final Map<String, Integer> usage = readUsageStats();
         Collections.sort(apps, new Comparator<ResolveInfo>() {
             @Override
             public int compare(ResolveInfo a, ResolveInfo b) {
@@ -1266,8 +1330,9 @@ public class MainActivity extends Activity {
                             handler.postDelayed(new Runnable() {
                                 @Override
                                 public void run() {
-                                    refreshApps();
-                                    publishAppList();
+                                    // The list changed on disk: query it
+                                    // again instead of trusting the snapshot.
+                                    reloadApps();
                                 }
                             }, 600);
                         }
@@ -2415,7 +2480,8 @@ public class MainActivity extends Activity {
         try {
             // Same order as the launcher grid: most recently used first, so
             // the phone's app list matches what the projector shows.
-            List<ResolveInfo> all = loadApps();
+            List<ResolveInfo> all = appList;
+            if (all == null) all = queryApps();
 
             File dir = getExternalFilesDir(null);
             if (dir == null) return;
@@ -2446,6 +2512,16 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             Log.w("HyRemote", "publishAppList failed: " + e);
         }
+    }
+
+    /** Publishes the list on a worker: it writes forty PNGs to the SD card. */
+    private void publishAppListAsync() {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                publishAppList();
+            }
+        }, "publish-apps").start();
     }
 
     private static int use(Map<String, Integer> usage, String pkg) {
