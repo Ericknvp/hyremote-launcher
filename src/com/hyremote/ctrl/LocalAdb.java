@@ -78,7 +78,7 @@ final class LocalAdb {
     }
 
     /** True when a shell can be reached on the local adbd. Cached for 30 s. */
-    static boolean available(Context ctx) {
+    static synchronized boolean available(Context ctx) {
         long now = System.currentTimeMillis();
         if (now - lastCheckAt < 30000) return lastCheck;
         String out = exec(ctx, "id -u");
@@ -107,6 +107,7 @@ final class LocalAdb {
 
             final int localId = 1;
             byte[] service = ("shell:" + command + "\0").getBytes("UTF-8");
+            Log.i(TAG, "exec open: " + command);
             writePacket(out, A_OPEN, localId, 0, service);
 
             ByteArrayOutputStream data = new ByteArrayOutputStream();
@@ -115,12 +116,21 @@ final class LocalAdb {
 
             while (System.currentTimeMillis() < deadline) {
                 Packet p = readPacket(in);
-                if (p == null) break;
+                if (p == null) {
+                    Log.i(TAG, "exec eof, bytes=" + data.size());
+                    break;
+                }
+                Log.i(TAG, "exec pkt " + cmdName(p.cmd) + " a0=" + p.arg0
+                        + " a1=" + p.arg1 + " len=" + (p.data == null ? 0 : p.data.length));
 
                 if (p.cmd == A_OKAY) {
                     if (p.arg1 == localId) remoteId = p.arg0;
                 } else if (p.cmd == A_WRTE) {
-                    if (p.arg0 == localId) {
+                    // A WRTE from the device carries the device's id in arg0
+                    // and the host's id in arg1. Checking arg0 against
+                    // localId drops every output chunk, so the shell looks
+                    // empty and the app reports "no ADB".
+                    if (p.arg1 == localId || p.arg0 == remoteId) {
                         if (p.data != null) data.write(p.data);
                         writePacket(out, A_OKAY, remoteId, localId, null);
                     }
@@ -212,6 +222,8 @@ final class LocalAdb {
         for (int i = 0; i < 8; i++) {
             Packet p = readPacket(in);
             if (p == null) throw new IOException("adbd closed the handshake");
+            Log.i(TAG, "handshake pkt " + cmdName(p.cmd) + " a0=" + p.arg0
+                    + " a1=" + p.arg1 + " len=" + (p.data == null ? 0 : p.data.length));
 
             if (p.cmd == A_CNXN) return;
 
@@ -408,6 +420,18 @@ final class LocalAdb {
 
         out.write(bb.array());
         out.flush();
+    }
+
+    private static String cmdName(int cmd) {
+        switch (cmd) {
+            case A_CNXN: return "CNXN";
+            case A_AUTH: return "AUTH";
+            case A_OPEN: return "OPEN";
+            case A_OKAY: return "OKAY";
+            case A_CLSE: return "CLSE";
+            case A_WRTE: return "WRTE";
+            default: return "0x" + Integer.toHexString(cmd);
+        }
     }
 
     private static Packet readPacket(InputStream in) throws IOException {
