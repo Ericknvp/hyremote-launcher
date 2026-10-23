@@ -10,6 +10,37 @@ iPhone (Safari)  ──WiFi──►  HY320  ──►  Android
 
 ---
 
+## Modo APK-only (v1.1)
+
+A partir de la 1.1 el servidor HTTP vive **dentro del APK**. Ya no hay que
+copiar scripts a `/data/local/tmp` ni ejecutar `setup.ps1` desde un PC:
+
+1. Instala el APK en el proyector.
+2. Ábrelo una vez y toca **"Poner como launcher"**.
+3. Escanea el QR desde el celular.
+
+La app levanta el servidor sola, sirve la página desde sus propios assets y
+publica el QR con la IP real del proyector.
+
+**Cómo se inyectan las teclas.** Android 13 no deja que una app normal pulse
+teclas en otras apps. La app usa el **ADB local** del propio proyector
+(`127.0.0.1:5555`), que en el HY320 viene activo de fábrica. No hace falta PC,
+cable ni root: es el mismo canal que usa `adb shell input` desde una
+computadora, pero iniciado desde el proyector. Si el equipo tiene la
+depuración por red apagada, se activa una vez en *Ajustes → Opciones de
+desarrollador → Depuración por red*; si aparece el diálogo **"¿Permitir
+depuración?"**, se acepta una vez con el control físico.
+
+Si no hay ADB ni accesibilidad, la página igual abre y funcionan el volumen,
+la lista de apps y abrir apps; el D-pad, Home y Atrás necesitan ADB local o el
+servicio de accesibilidad activo. El chip **Accesibilidad** de la barra
+inferior abre ese ajuste.
+
+El puente root de `setup.ps1` sigue siendo compatible: si ya está instalado y
+escuchando, la app lo detecta y lo deja a cargo.
+
+---
+
 ## Estado actual
 
 **Funciona.** Verificado sobre el equipo real:
@@ -28,28 +59,30 @@ iPhone (Safari)  ──WiFi──►  HY320  ──►  Android
 | QR en el launcher del proyector | Funciona, **generado en vivo** |
 | Panel de Bluetooth propio (lista, búsqueda, switch) | Funciona |
 | Entrada HDMI, ajustes, archivos, proyección keystone | Funciona |
-| Latencia y uso de CPU | 62-88 ms, 1 solo proceso `nc` |
+| Latencia y uso de CPU | 62-88 ms, servidor HTTP dentro de la app |
 
 **Latencia:** estable en 135-160 ms. Antes oscilaba entre 100 ms y 2100 ms.
 Causa y arreglo en [Latencia y doble arranque](#latencia-y-doble-arranque).
 
-**El bridge corre como root**, no como la app. No es un detalle: Android 13
-le niega `INJECT_EVENTS` a un uid de app, así que un bridge de app responde
-`{"ok":1}` a cada botón sin que pase nada en pantalla. Ver
+**El servidor corre en la app y las teclas salen por el ADB local.** Android 13
+le niega `INJECT_EVENTS` a un uid de app, pero el uid `shell` de `adbd` sí
+puede. La app abre una conexión a `127.0.0.1:5555` y pide `input keyevent` a
+ese shell. No es un bridge de app sin permisos que responde `{"ok":1}` sin
+hacer nada: es el mismo camino que `adb shell input`. Ver
 [Root](#por-qué-el-bridge-necesita-root).
 
 ---
 
 ## Cómo usarlo
 
-1. Encende el proyector y **espera ~6 segundos**.
+1. Encende el proyector y **espera unos segundos**.
 2. Escanea el QR con la cámara del iPhone.
 3. Listo.
 
-El bridge lo arranca `init` solo, temprano en el boot, así que ya está
-escuchando antes de que aparezca el launcher.
+La app arranca el servidor al iniciar y lo mantiene vivo con un servicio en
+primer plano, así que no depende de `init` ni de `serve.sh`.
 
-En el launcher del proyector también ves el QR y el estado del bridge.
+En el launcher del proyector también ves el QR y el estado del servidor.
 
 **Requisitos:** el iPhone y el proyector en la misma red WiFi.
 
@@ -67,9 +100,10 @@ realmente tomó.
 - La IP se lee de la interfaz de red del propio equipo (`NetworkInterface`),
   no de un archivo del proyecto.
 - El puerto se **descubre**: el launcher prueba `127.0.0.1` en el rango
-  8080-8095 y se queda con el que responde `pong`. `serve.sh` hace lo mismo
-  desde el otro lado: si el 8080 está ocupado, toma el siguiente libre y lo
-  escribe en `/data/local/tmp/hyremote/port`.
+  8080-8095 y se queda con el que responde `pong`. El servidor de la app hace
+  lo mismo del otro lado: si el 8080 está ocupado, toma el siguiente libre.
+  Si el puente root de `setup.ps1` está presente, la app lo deja quedarse con
+  el puerto.
 
 Consecuencia: **el mismo APK funciona en cualquier proyector y en cualquier
 casa**, sin recompilar y sin editar nada. El QR que ves en pantalla siempre
@@ -91,13 +125,12 @@ recibe el `BOOT_COMPLETED` y no es el launcher. El flujo completo es:
    `adb install`).
 2. Aparece el panel de bienvenida: logo, una línea de explicación y
    **"Poner como launcher"**.
-3. Al pulsarlo la app se pone de launcher **sola**: lo pide al bridge root
-   (que hace `set-home-activity` + el rol `HOME` + desactiva el launcher de
-   fábrica, porque el HOME por tecla lo despacha el `default_home` del
-   sistema). Sin bridge root, sale el diálogo del sistema para confirmarlo, o
-   la pantalla de ajustes del launcher.
-4. A partir de ahí, en cada arranque: el bridge levanta 1 s después del boot y
-   el launcher en pantalla ~15 s después, solo.
+3. Al pulsarlo la app se pone de launcher **sola** si el ADB local está
+   disponible (`set-home-activity` + rol `HOME` + desactivar el launcher de
+   fábrica). Si no, sale el diálogo del sistema para confirmarlo, o la
+   pantalla de ajustes del launcher.
+4. A partir de ahí, en cada arranque: el servidor de la app levanta con el
+   servicio y el launcher aparece solo.
 
 La app **no vuelve a preguntar**: el panel solo sale la primera vez. Y el chip
 **"Inicio"** de la barra inferior permite cambiar de launcher cuando quieras
@@ -230,7 +263,7 @@ hyremote/
 ├── build.ps1                Compila el APK
 ├── build-web.js             Genera index.html y lo valida
 ├── gen-qr.js                QR estático, solo para depurar
-└── hyremote-fase0.apk       APK compilado
+└── hyremote-1.1.apk         APK compilado (v1.1, APK-only)
 ```
 
 ### Archivos que importan
@@ -269,7 +302,7 @@ python tools/make-logo.py
 El APK está publicado como release, para instalarlo desde el navegador del
 proyector sin PC:
 
-**https://github.com/Ericknvp/hyremote-launcher/releases/download/v1.0/hyremote-fase0.apk**
+**https://github.com/Ericknvp/hyremote-launcher/releases/download/v1.1/hyremote-1.1.apk**
 
 Se descarga en `Download` y se instala desde *Archivos → Download* (Android
 pide permiso de "fuentes desconocidas" la primera vez).
@@ -280,7 +313,7 @@ En un proyector nuevo son **tres pasos**:
 
 ```powershell
 # 1. El launcher
-adb install -r hyremote-fase0.apk
+adb install -r hyremote-1.1.apk
 ```
 # 2. El bridge como root (una vez por dispositivo)
 powershell -ExecutionPolicy Bypass -File setup.ps1
@@ -294,14 +327,14 @@ El paso 2 reinicia el proyector la primera vez (init solo lee los `.rc` al
 boot). Las siguientes veces aplica los cambios sin reiniciar. Después,
 `verify.ps1` comprueba que todo responda.
 
-> El paso 2 es el único que necesita un PC en la misma red. Sin él, el APK
-> sigue instalando y el launcher funciona, y la página web también abre
-> (el bridge de respaldo la sirve), pero **los botones no inyectan teclas**:
-> eso solo lo puede hacer un proceso root.
+> El paso 2 (puente root) es **opcional** desde la 1.1. El APK ya sirve la
+> página y usa el ADB local del proyector para las teclas. Sin ADB local ni
+> accesibilidad, la página abre y funcionan volumen, apps y abrir apps, pero
+> el D-pad/Home/Atrás no. En el HY320 el ADB local viene activo de fábrica.
 
-Si tocaste `handler.sh`, `serve.sh` o `boot.sh`, corré `setup.ps1` además de
-recompilar el APK: los scripts que ejecuta `init` viven en `/system`, no en la
-app.
+Si tocaste `handler.sh`, `serve.sh` o `boot.sh`, esos scripts ya no son el
+camino principal: el servidor es `HttpServerLite.java`. Siguen siendo
+necesarios solo si querés mantener el puente root opcional de `setup.ps1`.
 
 ### Trampa: el overlay de `/system`
 
@@ -330,27 +363,25 @@ handler.sh[22]: syntax error: unexpected 'in'
 Los espacios al inicio de línea también rompen los `case` de `sh`. Si un
 endpoint devuelve 404 sin razón, sospechá de esto primero.
 
-`build.ps1` ya fuerza LF al copiar los scripts al APK.
+`build.ps1` ya no copia scripts al APK: la web se sirve desde
+`assets/www/index.html` y el servidor es Java.
 
 ---
 
 ## Diagnóstico
 
 ```powershell
-# ¿Contesta el bridge?
+# ¿Contesta el servidor?
 curl http://192.168.40.14:8080/ping     # debe decir pong
 
-# ¿Cuántos listeners hay? (debe ser 1)
-adb shell "netstat -ltnp | grep 8080"
+# ¿En qué modo está? (adb / accessibility / basic)
+curl http://192.168.40.14:8080/status
 
-# ¿Cuántos procesos? (debe ser 1 nc, 1 serve.sh)
-adb shell "ps -A -o NAME | grep -w nc | wc -l"
+# ¿Qué escribió la app?
+adb logcat -d -s HyRemoteHttp HyRemoteSvc HyRemoteAdb
 
-# ¿Qué escribió el servicio al arrancar?
-adb logcat -d -s HyRemoteBoot HyRemoteSvc
-
-# Historial del bridge
-adb shell "tail -20 /data/local/tmp/hyremote/bridge.log"
+# ¿El ADB local responde?
+adb shell "id -u"    # 0 o 2000 (shell)
 ```
 
 Conectar por ADB:
@@ -383,8 +414,9 @@ Android 13 lo hace por *restricted settings*, que bloquea apps instaladas
 fuera de la Play Store. Declarar la app como **launcher** la exime, porque
 Android necesita ese excepción justamente para TVs y proyectores.
 
-Por eso el proyecto virou a `input keyevent` con root: es la ruta que usan
-scrcpy y las herramientas reales.
+Por eso el proyecto viró a `input keyevent` por ADB: es la ruta que usan
+scrcpy y las herramientas reales. En la 1.1 ese ADB es el del propio
+proyector, no el de un PC.
 
 **2. Launcher del fabricante desactivado**
 
@@ -404,7 +436,7 @@ con 11 entradas en vez de 24.
 
 ---
 
-## Por qué el bridge necesita root
+## Por qué las teclas necesitan ADB (o root)
 
 El síntoma era desconcertante: cada botón respondía `{"ok":1}` y no pasaba
 nada. No era el navegador, ni el WiFi, ni la latencia.
@@ -426,8 +458,8 @@ mientras el equipo tenía 35.
 Cómo se comprobó, sin depender de la intuición:
 
 ```powershell
-adb shell input keyevent 3                # como root -> funciona
-curl -X POST -d 3 http://192.168.40.14:8080/key   # como app -> no hace nada
+adb shell input keyevent 3                # como shell/root -> funciona
+curl -X POST -d 3 http://192.168.40.14:8080/key   # como uid de app -> no hace nada
 ```
 
 `INJECT_EVENTS` es `signature|privileged`, así que `pm grant` la rechaza:
@@ -445,10 +477,12 @@ accessibility CONNECTED
 accessibility UNBOUND     ← 1,3 s después
 ```
 
-Lo que sí funciona en este firmware: **`adbd` corre como root** (dev build,
-`ro.build.type=userdebug`), y `adb remount` deja `/system` escribible. La
-solución es que `init` levante el bridge como root desde `/system`, en vez de
-que lo arranque la app.
+Lo que sí funciona en este firmware: **`adbd` escucha en el 5555** (dev build,
+`ro.build.type=userdebug`). La v1.0 instalaba un bridge en `/system` para que
+`init` lo arrancara como root. La v1.1 ya no necesita eso: `LocalAdb.java`
+abre una conexión TCP al `adbd` local y le pide `input keyevent` a su uid
+`shell`, que sí tiene `INJECT_EVENTS`. El puente root de `setup.ps1` sigue
+disponible como opción, pero la app funciona sin PC.
 
 ## Latencia y doble arranque
 
