@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Shown by the window manager from the tap until the first real frame.
+     Same ground and same mark as the launcher, so a cold start looks like a
+     deliberate launch screen instead of a white flash followed by a pause. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item android:drawable="@color/ground" />
+
+    <item
+        android:width="132dp"
+        android:height="132dp"
+        android:gravity="center"
+        android:drawable="@drawable/logo_mark" />
+
+</layer-list>

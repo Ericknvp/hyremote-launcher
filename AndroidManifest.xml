@@ -36,6 +36,7 @@
         android:label="HyRemote"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
+        android:theme="@style/LauncherTheme"
         android:allowBackup="false"
         android:usesCleartextTraffic="true">
 
