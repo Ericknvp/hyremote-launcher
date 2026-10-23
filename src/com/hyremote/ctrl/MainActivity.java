@@ -106,7 +106,6 @@ public class MainActivity extends Activity {
     static final int PORT_MAX = 8095;
 
     private static final int REQ_BLUETOOTH = 42;
-    private static final int REQ_LOCATION = 43;
     private static final int BT_NONE = 0;
     private static final int BT_TOGGLE = 1;
     private int pendingBluetooth = BT_NONE;
@@ -129,8 +128,6 @@ public class MainActivity extends Activity {
     private StatusIconView wifiIndicator;
     private StatusIconView btIndicator;
     private android.app.Dialog aboutDialog;
-    private android.app.Dialog welcomeDialog;
-    private Button welcomePrimary;
     private boolean pendingHomeCheck = false;
     private android.app.Dialog appDialog;
     private android.app.Dialog launcherDialog;
@@ -161,6 +158,33 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        // The remote comes first. A fresh sideload, a slow SoC or a firmware
+        // where one UI control throws must not leave the projector with no
+        // server: bind the port and start the service before drawing anything.
+        startRemoteService();
+        bootstrapServer();
+
+        // Claiming HOME is also a first-frame concern: it uses a short ADB
+        // probe and must run before the two-minute authorization warm-up.
+        claimHomeIfNeeded();
+
+        try {
+            buildUi();
+        } catch (Throwable t) {
+            // Never lose the QR because a tile, an icon or a vendor API is
+            // missing on a projector we have not seen. The fallback screen is
+            // the smallest thing that still lets the phone take control.
+            Log.e("HyRemote", "launcher UI failed, using the minimal screen", t);
+            try {
+                showMinimalScreen();
+            } catch (Throwable ignored) {
+                // Nothing else can be done; the service already owns the port.
+            }
+        }
+    }
+
+    /** The launcher screen, isolated so a failure has a fallback. */
+    private void buildUi() {
         animationsEnabled = readAnimationsEnabled();
         paintSystemBars();
 
@@ -206,24 +230,145 @@ public class MainActivity extends Activity {
 
         hideStatusBar();
 
-        // Keep the in-app server alive from the moment the launcher is up,
-        // instead of waiting for a reboot. There is no /data/local/tmp step
-        // anymore: HttpServerLite binds the port in this process, so a fresh
-        // sideload works without a PC and without root.
-        startRemoteService();
+        // The QR must be on screen on the first frame, not after the first
+        // poll: a new user is standing in front of the projector with a phone.
+        updateConnectCard();
+    }
 
-        askForNetworkName();
-        offerToBecomeHome();
+    /**
+     * Starts the in-app listener in this process as well as the service. Both
+     * go through the same singleton, so whichever wins binds the port and the
+     * other reuses it instead of opening a second one.
+     */
+    private void bootstrapServer() {
+        final Context app = getApplicationContext();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final HttpServerLite s = HttpServerLite.ensure(app);
+                if (s == null) return;
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        bridgePort = s.getPort();
+                        updateConnectCard();
+                    }
+                });
+            }
+        }, "server-boot").start();
+    }
+
+    /**
+     * First run: make HyRemote the home screen with no dialog when the
+     * projector's local ADB is available. That is what makes the server come
+     * back after a reboot on a plain sideload, without a PC or setup.ps1.
+     *
+     * If ADB is not available, the system role dialog is the only remaining
+     * way to change HOME, and the user confirms it once with the physical
+     * remote. The QR and the server do not depend on that choice.
+     */
+    private void claimHomeIfNeeded() {
+        if (HomeSwitcher.isHome(this)) {
+            // The role can survive a data wipe even though our prefs do not.
+            // Remember it so the boot path keeps writing the preference.
+            HomeSwitcher.markClaimed(this);
+            return;
+        }
+
+        final android.content.SharedPreferences sp =
+                getSharedPreferences("hyremote", MODE_PRIVATE);
+        if (sp.getBoolean("home_claim_done", false)) return;
+        sp.edit().putBoolean("home_claim_done", true).apply();
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                // Do not open a fresh ADB connection here. On a first run the
+                // key is not authorized yet, so a 4 s probe would trigger the
+                // "Allow debugging?" prompt and time out, leaving a pending
+                // prompt that blocks the 120 s warm-up. Use the system role
+                // dialog instead; once the warm-up has the key, the Inicio
+                // tile can switch HOME without a second prompt.
+                boolean ok = LocalAdb.available(MainActivity.this)
+                        && HomeSwitcher.set(MainActivity.this, "hyremote");
+                if (!ok) ok = HomeSwitcher.isHome(MainActivity.this);
+                final boolean claimed = ok;
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (claimed) {
+                            toast("HyRemote quedó como inicio");
+                            return;
+                        }
+                        // Do not open a second system dialog here: the
+                        // service is about to show the ADB authorization
+                        // prompt. The Inicio tile is always available for the
+                        // user who wants HyRemote as the home screen.
+                        toast("Toca Inicio para fijar HyRemote");
+                    }
+                });
+            }
+        }, "claim-home").start();
+    }
+
+    /**
+     * Last-resort screen: logo, the URL and the QR. It is what a user sees if
+     * the full launcher cannot be built on an unknown firmware, and it still
+     * delivers the whole point of the app.
+     */
+    private void showMinimalScreen() {
+        paintSystemBars();
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setGravity(Gravity.CENTER);
+        root.setPadding(dp(28), dp(24), dp(28), dp(24));
+        root.setBackgroundColor(GROUND);
+
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(R.drawable.logo_mark);
+        logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        root.addView(logo, new LinearLayout.LayoutParams(dp(84), dp(84)));
+
+        TextView title = text("HyRemote", 28, INK, Typeface.BOLD);
+        title.setGravity(Gravity.CENTER);
+        root.addView(title);
+
+        qrView = new ImageView(this);
+        qrView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        qrView.setBackground(rounded(0xFFFFFFFF, dp(R_PLATE), 0));
+        qrView.setPadding(dp(10), dp(10), dp(10), dp(10));
+        LinearLayout.LayoutParams qlp = new LinearLayout.LayoutParams(dp(220), dp(220));
+        qlp.topMargin = dp(18);
+        root.addView(qrView, qlp);
+
+        urlView = text("Buscando la red…", 14, INK_DIM, Typeface.NORMAL);
+        urlView.setGravity(Gravity.CENTER);
+        urlView.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL);
+        LinearLayout.LayoutParams ulp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        ulp.topMargin = dp(14);
+        root.addView(urlView, ulp);
+
+        TextView hint = text("Escanea el QR desde el celular.\nMisma red WiFi.",
+                T_BODY, INK_DIM, Typeface.NORMAL);
+        hint.setGravity(Gravity.CENTER);
+        hint.setLineSpacing(dp(3), 1f);
+        LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        hlp.topMargin = dp(10);
+        root.addView(hint, hlp);
+
+        setContentView(root);
+        hideStatusBar();
+        updateConnectCard();
     }
 
     /** Starts RemoteService with the right API for the running Android version. */
     private void startRemoteService() {
-        Intent svc = new Intent(this, RemoteService.class);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(svc);
-        } else {
-            startService(svc);
-        }
+        RemoteService.start(this);
     }
 
     private LayerDrawable buildBackdrop() {
@@ -246,6 +391,9 @@ public class MainActivity extends Activity {
         publishAppList();
         refreshApps();
         checkHomeResult();
+        // Do not wait two seconds for the first poll: a new user may already
+        // be pointing the phone at the screen.
+        updateConnectCard();
     }
 
     /** Rebuilds the app sections with the current recency order. */
@@ -1327,12 +1475,12 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Applies the home app choice, through the root bridge. */
+    /** Applies the home app choice through the projector's own adbd. */
     private void setHomeApp(final String which) {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final boolean ok = postBridge("/home", which);
+                final boolean ok = HomeSwitcher.set(MainActivity.this, which);
                 handler.post(new Runnable() {
                     @Override
                     public void run() {
@@ -1356,210 +1504,6 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * First run: offers to become the home launcher.
-     *
-     * A fresh install has two problems: the app is in the "stopped" state, so
-     * it does not even hear the boot until the user opens it once, and it is
-     * not the home app, so the projector keeps using the stock launcher. This
-     * panel appears the first time the app is opened and gets out of the way.
-     */
-    private void offerToBecomeHome() {
-        try {
-            if (isHomeApp(getPackageName())) return;
-            if (getSharedPreferences("hyremote", MODE_PRIVATE)
-                    .getBoolean("asked_home", false)) return;
-            getSharedPreferences("hyremote", MODE_PRIVATE)
-                    .edit().putBoolean("asked_home", true).apply();
-        } catch (Exception ignored) {
-        }
-        showWelcome();
-    }
-
-    private void showWelcome() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setGravity(Gravity.CENTER_HORIZONTAL);
-        root.setPadding(dp(30), dp(28), dp(30), dp(24));
-        root.setBackground(rounded(0xFF0B1220, dp(22), dp(1), 0x1FFFFFFF));
-
-        ImageView logo = new ImageView(this);
-        logo.setImageResource(R.drawable.logo_mark);
-        logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        root.addView(logo, new LinearLayout.LayoutParams(dp(96), dp(96)));
-
-        TextView title = text("Bienvenido a HyRemote", 21, INK, Typeface.BOLD);
-        title.setLetterSpacing(-0.02f);
-        title.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        tlp.topMargin = dp(12);
-        root.addView(title, tlp);
-
-        TextView body = text(
-                "Este es el launcher de tu proyector y el control remoto "
-                        + "desde el celular.\n\n Ponlo como launcher para que el "
-                        + "proyector arranque aquí.",
-                T_BODY, INK_DIM, Typeface.NORMAL);
-        body.setGravity(Gravity.CENTER);
-        body.setLineSpacing(dp(3), 1f);
-        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        blp.topMargin = dp(10);
-        root.addView(body, blp);
-
-        LinearLayout actions = new LinearLayout(this);
-        actions.setOrientation(LinearLayout.HORIZONTAL);
-        actions.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        alp.topMargin = dp(22);
-        root.addView(actions, alp);
-
-        Button set = chipButton("Poner como launcher", new Runnable() {
-            @Override
-            public void run() {
-                applyHomeApp();
-            }
-        });
-        set.setTextColor(ACCENT);
-        welcomePrimary = set;
-        actions.addView(set);
-
-        actions.addView(chipButton("Ahora no", new Runnable() {
-            @Override
-            public void run() {
-                if (welcomeDialog != null) welcomeDialog.dismiss();
-            }
-        }));
-
-        welcomeDialog = new android.app.Dialog(this);
-        welcomeDialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
-        welcomeDialog.setContentView(root);
-        android.view.Window w = welcomeDialog.getWindow();
-        if (w != null) {
-            w.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(0x00000000));
-        }
-        welcomeDialog.show();
-        if (w != null) w.setLayout(dp(450), ViewGroup.LayoutParams.WRAP_CONTENT);
-    }
-
-    /**
-     * Makes HyRemote the home app.
-     *
-     * The clean way is the root bridge, which sets it with no dialog at all.
-     * Without a root bridge the system asks the user to confirm the role
-     * (one tap), and if that is not available either, the home settings
-     * screen opens so the user can pick it.
-     */
-    private void applyHomeApp() {
-        if (isHomeApp(getPackageName())) {
-            dismissWelcome();
-            toast("HyRemote ya es el launcher");
-            return;
-        }
-
-        if (welcomePrimary != null) {
-            welcomePrimary.setEnabled(false);
-            welcomePrimary.setText("Un momento…");
-        }
-
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                final boolean viaBridge = postBridge("/home", "hyremote");
-                handler.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (viaBridge) {
-                            // El bridge root lo dejo puesto: no hay nada que
-                            // confirmar, solo avisar.
-                            dismissWelcome();
-                            toast("Listo: HyRemote ya es el launcher");
-                            return;
-                        }
-
-                        // Sin bridge: el sistema pide la confirmacion del rol.
-                        if (askForHomeRole()) {
-                            pendingHomeCheck = true;
-                            dismissWelcome();
-                            return;
-                        }
-
-                        // El UI de roles no esta disponible (o no se
-                        // muestra): se abre la pantalla de ajustes del
-                        // launcher, que es donde se puede elegir a mano.
-                        openHomeSettings();
-                    }
-                });
-            }
-        }, "apply-home").start();
-    }
-
-    /** La pantalla del sistema donde se elige el launcher, con un aviso. */
-    private void openHomeSettings() {
-        try {
-            startActivity(new Intent(Settings.ACTION_HOME_SETTINGS));
-            toast("Elige HyRemote como launcher en Ajustes");
-        } catch (Exception e) {
-            Log.w("HyRemote", "home settings: " + e);
-            showHomeHelp();
-        }
-        restoreWelcomeButton();
-    }
-
-    /** Ultimo recurso: explicar en casa como se hace. */
-    private void showHomeHelp() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(28), dp(24), dp(28), dp(22));
-        root.setBackground(rounded(0xFF0B1220, dp(22), dp(1), 0x1FFFFFFF));
-
-        TextView title = text("Poner HyRemote como launcher", 19, INK, Typeface.BOLD);
-        root.addView(title);
-
-        TextView body = text(
-                "En este equipo el launcher se cambia desde Ajustes:\n\n"
-                        + "1. Abre Ajustes (el engranaje de la barra superior).\n"
-                        + "2. Entra en 'Aplicaciones' o 'Preferencias' del sistema.\n"
-                        + "3. Elige 'Aplicación de inicio' y marca HyRemote.\n\n"
-                        + "Ojo: en una TV el botón HOME lo manda el launcher de "
-                        + "fabrica, asi que el paso 3 es el que de verdad cambia "
-                        + "las cosas.",
-                T_BODY, INK_DIM, Typeface.NORMAL);
-        body.setLineSpacing(dp(3), 1f);
-        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT);
-        blp.topMargin = dp(12);
-        root.addView(body, blp);
-
-        android.app.Dialog d = new android.app.Dialog(this);
-        d.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
-        d.setContentView(root);
-        android.view.Window w = d.getWindow();
-        if (w != null) {
-            w.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(0x00000000));
-        }
-        d.show();
-        if (w != null) w.setLayout(dp(440), ViewGroup.LayoutParams.WRAP_CONTENT);
-    }
-
-    private void dismissWelcome() {
-        if (welcomeDialog != null) welcomeDialog.dismiss();
-        welcomePrimary = null;
-    }
-
-    private void restoreWelcomeButton() {
-        if (welcomePrimary != null) {
-            welcomePrimary.setEnabled(true);
-            welcomePrimary.setText("Poner como launcher");
-        }
-    }
-
-    /**
      * Vuelve del dialogo del sistema: comprueba si HyRemote quedo como
      * launcher y lo dice. Sin esto, el usuario se queda sin saber si
      * funciono.
@@ -1567,10 +1511,30 @@ public class MainActivity extends Activity {
     private void checkHomeResult() {
         if (!pendingHomeCheck) return;
         pendingHomeCheck = false;
-        boolean ok = isHomeApp(getPackageName());
-        toast(ok
-                ? "Listo: HyRemote ya es el launcher"
-                : "HyRemote todavía no es el launcher. Inténtalo en Ajustes.");
+
+        if (isHomeApp(getPackageName())) {
+            HomeSwitcher.markClaimed(this);
+            toast("Listo: HyRemote ya es el launcher");
+            return;
+        }
+
+        // The user may have accepted the system dialog but the firmware
+        // still resolves HOME to the factory launcher. If the local ADB is
+        // available, write the choice directly before giving up.
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final boolean ok = HomeSwitcher.set(MainActivity.this, "hyremote");
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        toast(ok
+                                ? "Listo: HyRemote ya es el launcher"
+                                : "HyRemote todavía no es el launcher. Inténtalo en Ajustes.");
+                    }
+                });
+            }
+        }, "home-result").start();
     }
 
     /**
@@ -1897,10 +1861,24 @@ public class MainActivity extends Activity {
 
     /** Posts to the local bridge. True when the bridge answered. */
     private boolean postBridge(String path, String body) {
+        if (postTo(bridgePort, path, body)) return true;
+
+        // The port may have changed while the launcher was busy (or the
+        // server was still binding when the first action ran). Discover it
+        // and retry once instead of failing the button.
+        int port = detectBridgePort();
+        if (port != 0 && port != bridgePort) {
+            bridgePort = port;
+            return postTo(port, path, body);
+        }
+        return false;
+    }
+
+    private boolean postTo(int port, String path, String body) {
         HttpURLConnection c = null;
         try {
             c = (HttpURLConnection) new URL(
-                    "http://127.0.0.1:" + bridgePort + path).openConnection();
+                    "http://127.0.0.1:" + port + path).openConnection();
             c.setConnectTimeout(1200);
             c.setReadTimeout(1500);
             c.setRequestMethod("POST");
@@ -2049,9 +2027,6 @@ public class MainActivity extends Activity {
                                            int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode != REQ_BLUETOOTH) {
-            if (requestCode == REQ_LOCATION && bluetoothPanel != null) {
-                bluetoothPanel.onPermissionsResult();
-            }
             return;
         }
         if (bluetoothPanel != null) {
@@ -2076,10 +2051,8 @@ public class MainActivity extends Activity {
         String ip = localIpv4();
         String url = (ip == null) ? null : "http://" + ip + ":" + bridgePort;
 
-        if (url != null) {
-            urlView.setText(url);
-        } else {
-            urlView.setText("Sin WiFi");
+        if (urlView != null) {
+            urlView.setText(url != null ? url : "Sin WiFi");
         }
 
         if (url != null && !url.equals(lastQrUrl) && qrView != null) {
@@ -2159,22 +2132,6 @@ public class MainActivity extends Activity {
      * It is asked once, on the first launch; if the user says no, the
      * launcher shows the IP address instead and never asks again.
      */
-    private void askForNetworkName() {
-        try {
-            if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
-                    == android.content.pm.PackageManager.PERMISSION_GRANTED) return;
-            if (getSharedPreferences("hyremote", MODE_PRIVATE)
-                    .getBoolean("asked_location", false)) return;
-            getSharedPreferences("hyremote", MODE_PRIVATE)
-                    .edit().putBoolean("asked_location", true).apply();
-            requestPermissions(new String[]{
-                    android.Manifest.permission.ACCESS_FINE_LOCATION,
-                    android.Manifest.permission.ACCESS_COARSE_LOCATION},
-                    REQ_LOCATION);
-        } catch (Exception ignored) {
-        }
-    }
-
     private void updateConnectivity() {
         if (wifiIndicator != null) {
             wifiIndicator.setActive(isWifiOn());
