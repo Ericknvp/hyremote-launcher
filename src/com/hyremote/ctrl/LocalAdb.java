@@ -82,7 +82,7 @@ final class LocalAdb {
         long now = System.currentTimeMillis();
         if (now - lastCheckAt < 30000) return lastCheck;
         String out = exec(ctx, "id -u");
-        boolean ok = out != null && out.trim().length() > 0;
+        boolean ok = out != null && out.trim().matches("\\d+");
         lastCheckAt = System.currentTimeMillis();
         lastCheck = ok;
         if (!ok) Log.w(TAG, "local adbd not reachable on 127.0.0.1:" + PORT);
