@@ -98,7 +98,7 @@ if (-not (Test-Path $ks)) {
 $aligned = Join-Path $OUT "aligned.apk"
 & "$BT\zipalign.exe" -f 4 $apk $aligned
 
-$final = Join-Path $ROOT "hyremote-1.1.apk"
+$final = Join-Path $ROOT "hyremote-1.2.apk"
 & "$BT\apksigner.bat" sign `
     --ks $ks `
     --ks-pass pass:hyremote `
