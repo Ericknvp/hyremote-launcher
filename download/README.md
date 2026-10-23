@@ -41,4 +41,4 @@ código `8080` y la URL puesta: se puede importar directamente en Downloader
 La página de descarga también sirve:
 **https://ericknvp.github.io/hyremote-install/**
 con un botón y un QR. Y el APK suelto:
-**https://tinyurl.com/29frfo4d**
+**https://github.com/Ericknvp/hyremote-launcher/releases/download/v1.2/hyremote-1.2.apk**
