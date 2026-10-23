@@ -30,6 +30,7 @@ import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Talks to the projector's own adbd over the loopback interface.
@@ -71,56 +72,158 @@ final class LocalAdb {
 
     private static final int MAX_DATA = 4096;
 
-    private static long lastCheckAt = 0;
-    private static boolean lastCheck = false;
+    /** Normal command: a revoked key must not wedge the phone for minutes. */
+    private static final int ACTION_TIMEOUT_MS = 12000;
+
+    /** First-run probe: gives up before the authorization prompt can block. */
+    private static final int QUICK_TIMEOUT_MS = 4000;
+
+    /** Warm-up: this is the one that waits for the user to accept the prompt. */
+    private static final int WARMUP_TIMEOUT_MS = 120000;
+
+    private static volatile long lastCheckAt = 0;
+    private static volatile boolean lastCheck = false;
+
+    private static final AtomicBoolean warming = new AtomicBoolean(false);
+    private static final AtomicBoolean probing = new AtomicBoolean(false);
+    private static volatile boolean warmUpDone = false;
+
+    /**
+     * One authenticated connection is kept open and reused for every shell
+     * command. Opening a fresh connection per key press means a fresh
+     * "Allow debugging?" round trip on firmware that does not persist the
+     * key immediately, which makes the D-pad unusable. The ADB protocol
+     * multiplexes services, so a single CNXN connection can run any number
+     * of `shell:` streams one after another.
+     */
+    private static volatile Socket conn;
+    private static InputStream connIn;
+    private static OutputStream connOut;
+    private static int nextLocalId = 1;
 
     private LocalAdb() {
     }
 
-    /** True when a shell can be reached on the local adbd. Cached for 30 s. */
-    static synchronized boolean available(Context ctx) {
+    /**
+     * True when a shell can be reached on the local adbd.
+     *
+     * Never blocks: an HTTP request used to wait behind the two-minute
+     * "Allow debugging?" window, so /status and every button looked dead
+     * until the user walked over to the projector. Now the probe runs in the
+     * background and the caller gets the last known answer.
+     */
+    static boolean available(Context ctx) {
+        if (conn != null) {
+            lastCheck = true;
+            lastCheckAt = System.currentTimeMillis();
+            return true;
+        }
+        // Do not race the warm-up with a 4 s probe: that probe can consume
+        // the only authorization prompt before the 120 s warm-up gets it.
+        if (warming.get() || !warmUpDone) return lastCheck;
+
         long now = System.currentTimeMillis();
         if (now - lastCheckAt < 30000) return lastCheck;
-        String out = exec(ctx, "id -u");
-        boolean ok = out != null && out.trim().matches("\\d+");
-        lastCheckAt = System.currentTimeMillis();
-        lastCheck = ok;
-        if (!ok) Log.w(TAG, "local adbd not reachable on 127.0.0.1:" + PORT);
-        return ok;
+
+        if (probing.compareAndSet(false, true)) {
+            final Context app = ctx.getApplicationContext();
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        String out = execQuick(app, "id -u");
+                        boolean ok = out != null && out.trim().matches("\\d+");
+                        lastCheck = ok;
+                        lastCheckAt = System.currentTimeMillis();
+                        if (!ok) Log.w(TAG, "local adbd not reachable on 127.0.0.1:" + PORT);
+                    } finally {
+                        probing.set(false);
+                    }
+                }
+            }, "adb-probe").start();
+        }
+        return lastCheck;
+    }
+
+    /**
+     * Opens the long authorization window once, at service start. This is what
+     * makes the "Allow debugging?" dialog appear while the user is looking at
+     * the projector instead of on the first key press from the phone.
+     */
+    static void warmUp(Context ctx) {
+        if (!warming.compareAndSet(false, true)) return;
+        final Context app = ctx.getApplicationContext();
+        try {
+            String out = exec(app, "id -u", WARMUP_TIMEOUT_MS);
+            boolean ok = out != null && out.trim().matches("\\d+");
+            lastCheck = ok;
+            lastCheckAt = System.currentTimeMillis();
+            if (!ok) Log.w(TAG, "local adbd not reachable on 127.0.0.1:" + PORT);
+            else Log.i(TAG, "local adbd ready");
+        } finally {
+            warming.set(false);
+            warmUpDone = true;
+        }
+    }
+
+    /** True while the authorization window is open. */
+    static boolean isWarmingUp() {
+        return warming.get();
     }
 
     /** Forces the next available() call to probe again. */
-    static void invalidate() {
+    static synchronized void invalidate() {
         lastCheckAt = 0;
+        lastCheck = false;
+        closeConnection();
     }
 
     /**
      * Runs one command through the device's own shell and returns its output,
      * or null when ADB is not reachable. Callers must treat null as "no ADB".
      */
-    static synchronized String exec(Context ctx, String command) {
-        Socket socket = null;
-        try {
-            socket = connect(ctx);
-            OutputStream out = socket.getOutputStream();
-            InputStream in = socket.getInputStream();
+    static String exec(Context ctx, String command) {
+        return exec(ctx, command, ACTION_TIMEOUT_MS);
+    }
 
-            final int localId = 1;
+    /** A short probe that cannot sit on the authorization prompt for long. */
+    static String execQuick(Context ctx, String command) {
+        return exec(ctx, command, QUICK_TIMEOUT_MS);
+    }
+
+    private static synchronized String exec(Context ctx, String command,
+                                             int handshakeTimeoutMs) {
+        try {
+            if (conn == null) {
+                conn = connect(ctx, handshakeTimeoutMs);
+                connIn = conn.getInputStream();
+                connOut = conn.getOutputStream();
+                Log.i(TAG, "adb connection kept open for later commands");
+            }
+
+            final OutputStream out = connOut;
+            final InputStream in = connIn;
+
+            int localId = nextLocalId++;
+            if (nextLocalId <= 0) nextLocalId = 1;
+
             byte[] service = ("shell:" + command + "\0").getBytes("UTF-8");
-            Log.i(TAG, "exec open: " + command);
+            Log.d(TAG, "exec open " + localId + ": " + command);
             writePacket(out, A_OPEN, localId, 0, service);
 
             ByteArrayOutputStream data = new ByteArrayOutputStream();
             int remoteId = 0;
+            boolean closed = false;
             long deadline = System.currentTimeMillis() + 10000;
 
             while (System.currentTimeMillis() < deadline) {
                 Packet p = readPacket(in);
                 if (p == null) {
-                    Log.i(TAG, "exec eof, bytes=" + data.size());
-                    break;
+                    Log.d(TAG, "exec eof, bytes=" + data.size());
+                    closeConnection();
+                    return null;
                 }
-                Log.i(TAG, "exec pkt " + cmdName(p.cmd) + " a0=" + p.arg0
+                Log.d(TAG, "exec pkt " + cmdName(p.cmd) + " a0=" + p.arg0
                         + " a1=" + p.arg1 + " len=" + (p.data == null ? 0 : p.data.length));
 
                 if (p.cmd == A_OKAY) {
@@ -130,44 +233,67 @@ final class LocalAdb {
                     // and the host's id in arg1. Checking arg0 against
                     // localId drops every output chunk, so the shell looks
                     // empty and the app reports "no ADB".
-                    if (p.arg1 == localId || p.arg0 == remoteId) {
+                    if ((p.arg1 == localId && (remoteId == 0 || p.arg0 == remoteId))
+                            || (p.arg0 == localId && p.arg1 == remoteId)) {
                         if (p.data != null) data.write(p.data);
                         writePacket(out, A_OKAY, remoteId, localId, null);
                     }
                 } else if (p.cmd == A_CLSE) {
-                    writePacket(out, A_CLSE, remoteId, localId, null);
-                    break;
+                    // The device may report CLSE with the host id in arg0
+                    // and the device id in arg1, and a late CLSE for the
+                    // previous stream can arrive after the next OPEN. Match
+                    // either id against this stream's local id so a stale
+                    // close cannot end the new command early.
+                    if ((p.arg1 == localId && (remoteId == 0 || p.arg0 == remoteId))
+                            || (p.arg0 == localId && p.arg1 == remoteId)) {
+                        closed = true;
+                        break;
+                    }
                 } else if (p.cmd == A_AUTH) {
                     // A new authorization prompt while a shell is open: the
                     // old key is no longer trusted.
-                    invalidate();
+                    closeConnection();
+                    lastCheck = false;
+                    lastCheckAt = 0;
                     return null;
                 }
             }
+
+            if (!closed) {
+                Log.w(TAG, "adb shell timed out: " + command);
+                closeConnection();
+                return null;
+            }
+
+            lastCheck = true;
+            lastCheckAt = System.currentTimeMillis();
             return data.toString("UTF-8");
         } catch (Exception e) {
             Log.w(TAG, "adb exec failed: " + e);
-            invalidate();
+            closeConnection();
+            lastCheck = false;
+            lastCheckAt = 0;
             return null;
-        } finally {
-            close(socket);
         }
     }
 
     // ------------------------------------------------------------ handshake
 
-    private static Socket connect(Context ctx) throws Exception {
+    private static Socket connect(Context ctx, int handshakeTimeoutMs) throws Exception {
         List<String> hosts = candidateHosts();
         Exception last = null;
 
         for (String host : hosts) {
             Socket socket = new Socket();
+            boolean connected = false;
             try {
                 socket.connect(new InetSocketAddress(host, PORT), 800);
+                connected = true;
                 // The first connection shows Android's "Allow debugging?"
-                // dialog. Give the user time to pick up the physical remote;
-                // 15 s was too short and the host gave up before the tap.
-                socket.setSoTimeout(120000);
+                // dialog. The warm-up gives the user time to pick up the
+                // physical remote; normal commands use a short window so a
+                // revoked key does not freeze every request.
+                socket.setSoTimeout(handshakeTimeoutMs);
                 socket.setTcpNoDelay(true);
                 handshake(ctx, socket);
                 // Shell commands should not hang for two minutes.
@@ -175,6 +301,13 @@ final class LocalAdb {
                 return socket;
             } catch (Exception e) {
                 close(socket);
+                if (connected) {
+                    // The loopback socket reached adbd but the handshake
+                    // failed (usually because the auth prompt is pending).
+                    // Trying the WiFi address would open a second prompt for
+                    // the same key, so fail now.
+                    throw e;
+                }
                 last = e;
             }
         }
@@ -222,7 +355,7 @@ final class LocalAdb {
         for (int i = 0; i < 8; i++) {
             Packet p = readPacket(in);
             if (p == null) throw new IOException("adbd closed the handshake");
-            Log.i(TAG, "handshake pkt " + cmdName(p.cmd) + " a0=" + p.arg0
+            Log.d(TAG, "handshake pkt " + cmdName(p.cmd) + " a0=" + p.arg0
                     + " a1=" + p.arg1 + " len=" + (p.data == null ? 0 : p.data.length));
 
             if (p.cmd == A_CNXN) return;
@@ -463,6 +596,14 @@ final class LocalAdb {
             off += n;
         }
         return buf;
+    }
+
+    private static void closeConnection() {
+        Socket s = conn;
+        conn = null;
+        connIn = null;
+        connOut = null;
+        close(s);
     }
 
     private static void close(Socket s) {
