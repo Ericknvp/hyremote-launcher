@@ -72,8 +72,63 @@ public class HttpServerLite {
     private volatile String focusCache = "";
     private volatile long focusAt;
 
+    // One server per process. MainActivity and RemoteService both ask for it:
+    // the activity so a fresh sideload has a QR even if the service fails, the
+    // service so the port survives the activity going away. Without this the
+    // two could bind 8080 and 8081 and the QR would point at the wrong one.
+    private static volatile HttpServerLite instance;
+    private static final Object INSTANCE_LOCK = new Object();
+    private static long nextAttemptAt = 0;
+
+    private static long bridgeCheckedAt = 0;
+    private static boolean bridgeChecked = false;
+
     public HttpServerLite(Context ctx) {
         this.ctx = ctx.getApplicationContext();
+    }
+
+    /** The running server, or null when it has not started. */
+    static HttpServerLite current() {
+        HttpServerLite s = instance;
+        return s != null && s.isRunning() ? s : null;
+    }
+
+    /**
+     * Starts the in-app server exactly once. Safe to call from the activity,
+     * the service and the watchdog: the first caller binds, the rest reuse
+     * the same listener. Returns null when the optional root bridge owns the
+     * ports or when every port in the range is busy.
+     */
+    static HttpServerLite ensure(Context ctx) {
+        synchronized (INSTANCE_LOCK) {
+            HttpServerLite existing = instance;
+            if (existing != null && existing.isRunning()) return existing;
+
+            long now = System.currentTimeMillis();
+            if (now < nextAttemptAt) return null;
+            if (shellBridgeUp()) return null;
+
+            try {
+                HttpServerLite s = new HttpServerLite(ctx);
+                s.start();
+                instance = s;
+                Log.i(TAG, "app server listening on port " + s.getPort());
+                return s;
+            } catch (Exception e) {
+                nextAttemptAt = now + 5000;
+                Log.e(TAG, "server start failed", e);
+                return null;
+            }
+        }
+    }
+
+    /** Stops and forgets the listener. Only the app going away uses this. */
+    static void stopInstance() {
+        synchronized (INSTANCE_LOCK) {
+            HttpServerLite s = instance;
+            instance = null;
+            if (s != null) s.stop();
+        }
     }
 
     public int getPort() {
@@ -163,11 +218,20 @@ public class HttpServerLite {
      * faster and can do package/role changes that a shell cannot.
      */
     static boolean shellBridgeUp() {
+        long now = System.currentTimeMillis();
+        if (now - bridgeCheckedAt < 30000) return bridgeChecked;
+
+        boolean up = false;
         for (int p = PORT_MIN; p <= PORT_MAX; p++) {
             String body = httpGet("http://127.0.0.1:" + p + "/status", 350);
-            if (body != null && body.contains("hyremote-bridge")) return true;
+            if (body != null && body.contains("hyremote-bridge")) {
+                up = true;
+                break;
+            }
         }
-        return false;
+        bridgeChecked = up;
+        bridgeCheckedAt = now;
+        return up;
     }
 
     private static String httpGet(String url, int timeoutMs) {
@@ -697,32 +761,7 @@ public class HttpServerLite {
     }
 
     private boolean home(String which) {
-        if (!LocalAdb.available(ctx)) return false;
-        String target;
-        String pkg;
-        if ("hyremote".equals(which)) {
-            target = "com.hyremote.ctrl/.MainActivity";
-            pkg = "com.hyremote.ctrl";
-        } else if ("original".equals(which)) {
-            target = "com.htc.htclauncherhighenglishd08/com.mao.launcher.activity.BarrelActivity";
-            pkg = "com.htc.htclauncherhighenglishd08";
-            LocalAdb.exec(ctx, "pm enable --user 0 " + pkg);
-        } else {
-            return false;
-        }
-
-        LocalAdb.exec(ctx, "cmd package set-home-activity " + target);
-        String out = LocalAdb.exec(ctx,
-                "cmd role add-role-holder --user 0 android.app.role.HOME " + pkg);
-        boolean ok = out != null && !commandFailed(out);
-
-        // Only disable the vendor launcher after HyRemote actually owns the
-        // HOME role: doing it the other way around can leave the projector
-        // with no home app if the role command is rejected.
-        if (ok && "hyremote".equals(which)) {
-            LocalAdb.exec(ctx, "pm disable-user --user 0 com.htc.htclauncherhighenglishd08");
-        }
-        return ok;
+        return HomeSwitcher.set(ctx, which);
     }
 
     private boolean packageAction(String body) {
