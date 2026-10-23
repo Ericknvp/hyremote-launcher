@@ -688,7 +688,6 @@ public class HttpServerLite {
         if ("hyremote".equals(which)) {
             target = "com.hyremote.ctrl/.MainActivity";
             pkg = "com.hyremote.ctrl";
-            LocalAdb.exec(ctx, "pm disable-user --user 0 com.htc.htclauncherhighenglishd08");
         } else if ("original".equals(which)) {
             target = "com.htc.htclauncherhighenglishd08/com.mao.launcher.activity.BarrelActivity";
             pkg = "com.htc.htclauncherhighenglishd08";
@@ -696,10 +695,19 @@ public class HttpServerLite {
         } else {
             return false;
         }
+
         LocalAdb.exec(ctx, "cmd package set-home-activity " + target);
         String out = LocalAdb.exec(ctx,
                 "cmd role add-role-holder --user 0 android.app.role.HOME " + pkg);
-        return out != null && !commandFailed(out);
+        boolean ok = out != null && !commandFailed(out);
+
+        // Only disable the vendor launcher after HyRemote actually owns the
+        // HOME role: doing it the other way around can leave the projector
+        // with no home app if the role command is rejected.
+        if (ok && "hyremote".equals(which)) {
+            LocalAdb.exec(ctx, "pm disable-user --user 0 com.htc.htclauncherhighenglishd08");
+        }
+        return ok;
     }
 
     private boolean packageAction(String body) {
