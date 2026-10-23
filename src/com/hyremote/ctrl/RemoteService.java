@@ -61,17 +61,20 @@ public class RemoteService extends Service {
     public void onCreate() {
         super.onCreate();
 
-        // Bind the port before the notification and before any UI. If the
-        // foreground service is rejected on an unknown firmware, the activity
-        // still owns a live server and the QR still works.
-        HttpServerLite.ensure(this);
-
+        // Satisfy the five-second foreground deadline first: Android kills a
+        // startForegroundService() that has not called startForeground(). The
+        // catch is deliberate, though: a firmware that rejects the
+        // notification must not stop the server from binding right after.
         try {
             createChannel();
             startForegroundCompat();
         } catch (Throwable t) {
             Log.e(TAG, "foreground notification failed", t);
         }
+
+        // Bind the port before any UI. If the activity's layout fails on an
+        // unknown projector, the control is already reachable.
+        HttpServerLite.ensure(this);
 
         startWatchdog();
         warmUpAdb();
