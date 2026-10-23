@@ -12,7 +12,7 @@ Enlace a la app en la Play Store:
 | | |
 |---|---|
 | **Código** | `8080` |
-| **Apunta a** | `https://github.com/Ericknvp/hyremote-launcher/releases/download/v1.1/hyremote-1.1.apk` |
+| **Apunta a** | `https://github.com/Ericknvp/hyremote-launcher/releases/download/v1.2/hyremote-1.2.apk` |
 
 ## Cómo crearlo (en el equipo donde se instala)
 
@@ -27,7 +27,10 @@ Enlace a la app en la Play Store:
 1. Instala **Downloader** desde la Play Store (el proyector la tiene).
 2. Escribe `8080` en la barra de Downloader → **Enter** → descarga el APK.
 3. Ábrelo (Downloader te ofrece "Instalar" al terminar) → acepta.
-4. Abre **HyRemote** → toca **"Poner como launcher"**.
+4. Toca **Abrir** cuando el instalador lo ofrezca. El QR aparece solo.
+5. Si sale **"¿Permitir depuración USB?"**, acéptalo una vez y marca
+   **"Permitir siempre"**: eso habilita el D-pad. Si quieres HyRemote como
+   launcher, toca **Inicio** en la barra inferior.
 
 El archivo de este repo (`download/hyremote.dlpackage`) ya viene con el
 código `8080` y la URL puesta: se puede importar directamente en Downloader

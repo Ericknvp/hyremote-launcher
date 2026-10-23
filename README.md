@@ -10,14 +10,26 @@ iPhone (Safari)  ──WiFi──►  HY320  ──►  Android
 
 ---
 
-## Modo APK-only (v1.1)
+## Modo APK-only (v1.2)
 
-A partir de la 1.1 el servidor HTTP vive **dentro del APK**. Ya no hay que
-copiar scripts a `/data/local/tmp` ni ejecutar `setup.ps1` desde un PC:
+Desde la 1.1 el servidor HTTP vive **dentro del APK**. Ya no hay que copiar
+scripts a `/data/local/tmp`, ejecutar `setup.ps1` ni conectar un PC:
 
 1. Instala el APK en el proyector.
-2. Ábrelo una vez y toca **"Poner como launcher"**.
-3. Escanea el QR desde el celular.
+2. Ábrelo una vez con el botón **Abrir** del instalador (Android no deja que
+   una app recién instalada se ejecute antes de ese primer toque).
+3. Escanea el QR. La app ya está sirviendo el control.
+
+No hay panel de bienvenida ni botón **"Poner como launcher"**: el servidor
+arranca antes de dibujar la pantalla y el QR aparece en el primer frame. El
+cambio de launcher se intenta en segundo plano con el ADB local; si el ADB
+todavía no está autorizado, toca **Inicio** para fijarlo. El QR y el servidor
+funcionan igual aunque no cambies el launcher.
+
+En la primera instalación el proyector puede mostrar **"¿Permitir depuración
+USB?"**. Acéptalo una vez con el control físico y marca **"Permitir siempre"**
+si aparece: eso es lo que habilita el D-pad y las teclas Home/Atrás. Es un
+permiso del proyector, no un PC ni un script.
 
 La app levanta el servidor sola, sirve la página desde sus propios assets y
 publica el QR con la IP real del proyector.
@@ -119,22 +131,30 @@ librería externa ni conexión a internet.
 ## El flujo la primera vez
 
 Cuando alguien instala el APK (sideload) la app está en estado *stopped*: no
-recibe el `BOOT_COMPLETED` y no es el launcher. El flujo completo es:
+recibe el `BOOT_COMPLETED` hasta que se abre una vez. Ese primer toque en
+**Abrir** es una regla de Android, no de la app. Después de ese toque no hay
+nada más que hacer:
 
-1. **Instala** el APK y la abre una vez (desde el explorador de archivos o
-   `adb install`).
-2. Aparece el panel de bienvenida: logo, una línea de explicación y
-   **"Poner como launcher"**.
-3. Al pulsarlo la app se pone de launcher **sola** si el ADB local está
-   disponible (`set-home-activity` + rol `HOME` + desactivar el launcher de
-   fábrica). Si no, sale el diálogo del sistema para confirmarlo, o la
-   pantalla de ajustes del launcher.
-4. A partir de ahí, en cada arranque: el servidor de la app levanta con el
-   servicio y el launcher aparece solo.
+1. **Instala** el APK y toca **Abrir** cuando el instalador lo ofrezca.
+2. El servidor HTTP se enlaza **antes** de construir la interfaz y el QR
+   aparece de inmediato, sin esperar al primer sondeo.
+3. Si el proyector muestra **"¿Permitir depuración USB?"**, acéptalo una vez
+   con el control físico y marca **"Permitir siempre"**. Ese permiso es el que
+   habilita el D-pad y las teclas Home/Atrás. Si no aparece, el ADB local ya
+   estaba autorizado.
+4. En segundo plano la app intenta ponerse como launcher con el ADB local
+   (`set-home-activity` + rol `HOME` + desactivar el launcher de fábrica).
+   Si no lo logra, toca **Inicio** en la barra inferior; el QR y el control
+   por web funcionan igual.
+5. En cada arranque el `BootReceiver` vuelve a arrancar el servicio, reescribe
+   la preferencia HOME (algunos firmwares la revierten) y, si HyRemote es el
+   launcher, lo pone en pantalla. También se dispara tras actualizar el APK
+   (`MY_PACKAGE_REPLACED`) y con los `QUICKBOOT_POWERON` de las TVs.
 
-La app **no vuelve a preguntar**: el panel solo sale la primera vez. Y el chip
-**"Inicio"** de la barra inferior permite cambiar de launcher cuando quieras
-(HyRemote ↔ original), con el mismo mecanismo.
+La app **no vuelve a preguntar** por el launcher: el intento automático se
+recuerda y el chip **"Inicio"** de la barra inferior permite cambiar cuando
+quieras (HyRemote ↔ original), con el mismo mecanismo. Elegir el original
+borra la marca para que el arranque no vuelva a poner HyRemote por encima.
 
 ---
 
@@ -257,30 +277,39 @@ hyremote/
 ├── buildapps.sh             Prepara /apps con íconos embebidos
 ├── listapps.sh              Respaldo para listar apps
 │
-├── hyremote.rc              Servicio de init: levanta el bridge como root
-├── setup.ps1                Instala el bridge en /system (una vez)
+├── hyremote.rc              Servicio de init del bridge root (legacy, opcional)
+├── setup.ps1                Instala el bridge en /system (legacy, opcional)
 ├── verify.ps1               Chequea que todo responda
 ├── build.ps1                Compila el APK
 ├── build-web.js             Genera index.html y lo valida
 ├── gen-qr.js                QR estático, solo para depurar
-└── hyremote-1.1.apk         APK compilado (v1.1, APK-only)
+└── hyremote-1.2.apk         APK compilado (v1.2, APK-only)
 ```
 
 ### Archivos que importan
 
-**`handler.sh`** — traduce HTTP a `input keyevent`. Todo el control pasa por
-acá. Ojo con los saltos de línea: **deben ser LF**, no CRLF (ver más abajo).
+**`HttpServerLite.java`** — el servidor HTTP que vive en la app. Enlaza el
+primer puerto libre de 8080-8095 y sirve `/`, `/ping`, `/status`, `/key`,
+`/apps`, `/home`, etc. Es un singleton: la actividad y el servicio piden el
+mismo listener, así que nunca hay dos puertos ni un QR apuntando al viejo.
 
-**`hyremote.rc`** — le dice a `init` que arranque el bridge como root. Es lo
-que hace que los botones funcionen.
+**`RemoteService.java`** — foreground service. Enlaza el servidor **antes** de
+la notificación, lo vigila cada 5 s y abre la ventana de autorización del ADB
+local una vez. También reescribe la preferencia HOME después del boot.
 
-**`RemoteService.java`** — foreground service. Solo muestra la notificación y
-vigila que el bridge esté vivo; **no** se queda con el puerto 8080. Si lo
-hace, se queda con un puente sin permisos y el control deja de funcionar.
+**`HomeSwitcher.java`** — el único camino para cambiar de launcher: lo usan
+el arranque automático, el chip **Inicio** y el endpoint `/home`. Pone
+`set-home-activity` + rol `HOME` y solo desactiva el launcher de fábrica
+cuando HyRemote ya quedó como HOME.
 
-**`MainActivity.java`** — el launcher. Publica la lista de apps con íconos,
-dibuja el QR con la IP y el puerto del momento, y trae los accesos rápidos
-(Ajustes, Archivos, HDMI, Proyección, Bluetooth).
+**`MainActivity.java`** — el launcher. Arranca el servidor antes de construir
+la interfaz, publica la lista de apps con íconos, dibuja el QR con la IP y el
+puerto del momento, y trae los accesos rápidos (Ajustes, Archivos, HDMI,
+Proyección, Bluetooth).
+
+**`handler.sh` / `hyremote.rc`** — puente root legacy de `setup.ps1`. Ya no
+son el camino principal; solo se usan si hay un bridge root instalado. Ojo con
+los saltos de línea: **deben ser LF**, no CRLF (ver más abajo).
 
 ---
 
@@ -302,36 +331,37 @@ python tools/make-logo.py
 El APK está publicado como release, para instalarlo desde el navegador del
 proyector sin PC:
 
-**https://github.com/Ericknvp/hyremote-launcher/releases/download/v1.1/hyremote-1.1.apk**
+**https://github.com/Ericknvp/hyremote-launcher/releases/download/v1.2/hyremote-1.2.apk**
 
 Se descarga en `Download` y se instala desde *Archivos → Download* (Android
 pide permiso de "fuentes desconocidas" la primera vez).
 
 ## Instalar
 
-En un proyector nuevo son **tres pasos**:
+En un proyector nuevo, sin PC:
+
+1. Descarga el APK desde el enlace de arriba y ábrelo desde **Archivos →
+   Download**.
+2. Toca **Abrir** cuando el instalador lo ofrezca. Es el único toque que
+   Android exige después de un sideload.
+3. Listo: el QR ya está en pantalla y la app se pone como launcher sola.
+
+Si preferís instalarlo por cable, alcanza con:
 
 ```powershell
-# 1. El launcher
-adb install -r hyremote-1.1.apk
-```
-# 2. El bridge como root (una vez por dispositivo)
-powershell -ExecutionPolicy Bypass -File setup.ps1
-
-# 3. Dejarlo como launcher y apagar el del fabricante
-adb shell cmd package set-home-activity com.hyremote.ctrl/.MainActivity
-adb shell pm disable-user --user 0 com.htc.htclauncherhighenglishd08
+adb install -r hyremote-1.2.apk
 ```
 
-El paso 2 reinicia el proyector la primera vez (init solo lee los `.rc` al
-boot). Las siguientes veces aplica los cambios sin reiniciar. Después,
-`verify.ps1` comprueba que todo responda.
+No hace falta `setup.ps1`, ni root, ni reiniciar: el servidor HTTP vive en el
+APK y las teclas salen por el ADB local del proyector.
 
-> El paso 2 (puente root) es **opcional** desde la 1.1. El APK ya sirve la
-> página y usa el ADB local del proyector para las teclas. Sin ADB local ni
+> **Opcional: bridge root.** `setup.ps1` sigue existiendo para unidades donde
+> el ADB local esté apagado y no se pueda activar. Si ya hay un bridge root
+> escuchando, la app lo detecta y lo deja a cargo. Sin ADB local ni
 > accesibilidad, la página abre y funcionan volumen, apps y abrir apps, pero
 > el D-pad/Home/Atrás no. En las unidades HY320 que probamos el ADB local
-> viene activo; si la tuya no, se activa una vez como se explica arriba.
+> viene activo; si la tuya no, se activa una vez en *Ajustes → Opciones de
+> desarrollador → Depuración por red* y se acepta el aviso con el control.
 
 Si tocaste `handler.sh`, `serve.sh` o `boot.sh`, esos scripts ya no son el
 camino principal: el servidor es `HttpServerLite.java`. Siguen siendo
