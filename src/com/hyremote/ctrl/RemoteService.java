@@ -72,9 +72,11 @@ public class RemoteService extends Service {
             Log.e(TAG, "foreground notification failed", t);
         }
 
-        // Bind the port before any UI. If the activity's layout fails on an
-        // unknown projector, the control is already reachable.
-        HttpServerLite.ensure(this);
+        // Bind the port, but never on the main thread: ensure() probes the
+        // ports to see whether the optional root bridge already owns them, and
+        // that probe is network work. During boot the main thread is exactly
+        // the resource the first frame needs.
+        bindServerAsync();
 
         startWatchdog();
         warmUpAdb();
@@ -82,8 +84,18 @@ public class RemoteService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        HttpServerLite.ensure(this);
+        bindServerAsync();
         return START_STICKY;
+    }
+
+    /** Starts the listener from a worker thread, whoever asks for it. */
+    private void bindServerAsync() {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                HttpServerLite.ensure(RemoteService.this);
+            }
+        }, "server-boot").start();
     }
 
     /**
