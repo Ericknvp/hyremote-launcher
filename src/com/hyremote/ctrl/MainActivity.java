@@ -20,6 +20,7 @@ import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.Log;
@@ -27,6 +28,7 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.animation.DecelerateInterpolator;
@@ -136,6 +138,12 @@ public class MainActivity extends Activity {
     private int bridgePort = RemoteService.PORT;
     private String lastQrUrl = null;
 
+    // Startup is measured from the moment the process was forked, not from
+    // onCreate: on a cold boot the launcher pays for the framework, the dex
+    // verification and the package scan before our first line runs.
+    private static final long PROCESS_START_MS = android.os.Process.getStartElapsedRealtime();
+    private boolean firstFrameLogged = false;
+
     private final android.os.Handler handler =
             new android.os.Handler(android.os.Looper.getMainLooper());
     private final AtomicBoolean polling = new AtomicBoolean(false);
@@ -181,6 +189,13 @@ public class MainActivity extends Activity {
                 // Nothing else can be done; the service already owns the port.
             }
         }
+
+        Log.i("HyRemote", "onCreate terminó a los " + sinceProcessStart() + " ms");
+    }
+
+    /** Milliseconds since this process was forked, for the boot log. */
+    private long sinceProcessStart() {
+        return SystemClock.elapsedRealtime() - PROCESS_START_MS;
     }
 
     /** The launcher screen, isolated so a failure has a fallback. */
@@ -233,6 +248,33 @@ public class MainActivity extends Activity {
         // The QR must be on screen on the first frame, not after the first
         // poll: a new user is standing in front of the projector with a phone.
         updateConnectCard();
+
+        logFirstFrame(root);
+    }
+
+    /**
+     * Says how long the projector took to actually paint something.
+     *
+     * "Tarda en iniciar" has three very different causes - the system
+     * delivering BOOT_COMPLETED late, our own main thread doing too much
+     * before the first draw, or the SoC being slow to load the dex - and the
+     * only way to tell them apart is a number measured at the frame.
+     */
+    private void logFirstFrame(View root) {
+        if (firstFrameLogged) return;
+        final ViewTreeObserver vto = root.getViewTreeObserver();
+        vto.addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override
+            public boolean onPreDraw() {
+                if (!firstFrameLogged) {
+                    firstFrameLogged = true;
+                    Log.i("HyRemote", "primer frame a los "
+                            + sinceProcessStart() + " ms del proceso");
+                }
+                if (vto.isAlive()) vto.removeOnPreDrawListener(this);
+                return true;
+            }
+        });
     }
 
     /**
@@ -364,6 +406,7 @@ public class MainActivity extends Activity {
         setContentView(root);
         hideStatusBar();
         updateConnectCard();
+        logFirstFrame(root);
     }
 
     /** Starts RemoteService with the right API for the running Android version. */
