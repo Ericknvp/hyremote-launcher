@@ -32,6 +32,7 @@ public class RemoteAccessibilityService extends AccessibilityService {
 
     private static final String TAG = "HyRemoteAcc";
     private static volatile boolean connected = false;
+    static volatile RemoteAccessibilityService instance = null;
 
     private Object inputManager;
     private Method injectInputEvent;
@@ -47,6 +48,7 @@ public class RemoteAccessibilityService extends AccessibilityService {
     protected void onServiceConnected() {
         super.onServiceConnected();
         connected = true;
+        instance = this;
         initReflection();
         Log.i(TAG, "accessibility CONNECTED, reflectionUsable=" + reflectionUsable);
     }
@@ -63,8 +65,16 @@ public class RemoteAccessibilityService extends AccessibilityService {
     @Override
     public boolean onUnbind(android.content.Intent intent) {
         connected = false;
+        if (instance == this) instance = null;
         Log.w(TAG, "accessibility UNBOUND");
         return super.onUnbind(intent);
+    }
+
+    @Override
+    public void onDestroy() {
+        connected = false;
+        if (instance == this) instance = null;
+        super.onDestroy();
     }
 
     public boolean isConnected() {
@@ -158,6 +168,58 @@ public class RemoteAccessibilityService extends AccessibilityService {
             return true;
         } catch (Throwable t) {
             Log.w(TAG, "tap failed: " + t);
+            return false;
+        }
+    }
+
+    /**
+     * Writes text into whatever editable field has input focus. This is the
+     * clean fallback when the local adbd is not available: unlike
+     * `input text`, it preserves accents and does not need a shell.
+     */
+    public boolean setText(String text) {
+        try {
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root == null) return false;
+            AccessibilityNodeInfo focus = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+            if (focus == null) return false;
+            android.os.Bundle args = new android.os.Bundle();
+            args.putCharSequence(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
+            return focus.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+        } catch (Throwable t) {
+            Log.w(TAG, "setText failed: " + t);
+            return false;
+        }
+    }
+
+    /** Swipes between two absolute screen coordinates. */
+    public boolean swipe(int x1, int y1, int x2, int y2, int durationMs) {
+        try {
+            long now = SystemClock.uptimeMillis();
+            android.accessibilityservice.GestureDescription.Builder b =
+                    new android.accessibilityservice.GestureDescription.Builder();
+            android.graphics.Path path = new android.graphics.Path();
+            path.moveTo(x1, y1);
+            path.lineTo(x2, y2);
+            b.addStroke(new android.accessibilityservice.GestureDescription.StrokeDescription(
+                    path, 0, Math.max(1, durationMs)));
+            final boolean[] ok = {false};
+            dispatchGesture(b.build(),
+                    new android.accessibilityservice.AccessibilityService.GestureResultCallback() {
+                        @Override
+                        public void onCompleted(android.accessibilityservice.GestureDescription g) {
+                            ok[0] = true;
+                        }
+
+                        @Override
+                        public void onCancelled(android.accessibilityservice.GestureDescription g) {
+                            ok[0] = false;
+                        }
+                    }, null);
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "swipe failed: " + t);
             return false;
         }
     }
