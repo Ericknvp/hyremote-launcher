@@ -12,7 +12,7 @@ Enlace a la app en la Play Store:
 | | |
 |---|---|
 | **Código** | `8080` |
-| **Apunta a** | `https://github.com/Ericknvp/hyremote-launcher/releases/download/v1.0/hyremote-fase0.apk` |
+| **Apunta a** | `https://github.com/Ericknvp/hyremote-launcher/releases/download/v1.1/hyremote-1.1.apk` |
 
 ## Cómo crearlo (en el equipo donde se instala)
 
