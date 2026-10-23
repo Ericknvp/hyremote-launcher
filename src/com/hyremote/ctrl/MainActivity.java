@@ -125,6 +125,16 @@ public class MainActivity extends Activity {
     private View primaryFocus;
     private GridLayout appGrid;
     private Map<String, Long> recencyMap;
+
+    // Decoding a launcher icon costs real time on this SoC, and the app column
+    // is rebuilt every time the launcher resumes. These keep the work of one
+    // decode for the life of the process.
+    private final Map<String, android.graphics.drawable.Drawable> iconCache = new HashMap<>();
+    private final Map<String, String> labelCache = new HashMap<>();
+    private Map<String, Integer> usageCache;
+    private long usageCacheAt;
+    private long recencyCacheAt;
+
     private LinearLayout appsColumn;
     private String lastForegroundPkg;
     private StatusIconView wifiIndicator;
@@ -849,7 +859,7 @@ public class MainActivity extends Activity {
     }
 
     private View buildRecentTile(final ResolveInfo ri) {
-        final String label = String.valueOf(ri.loadLabel(getPackageManager()));
+        final String label = labelOf(ri);
 
         LinearLayout tile = new LinearLayout(this);
         tile.setOrientation(LinearLayout.VERTICAL);
@@ -864,7 +874,7 @@ public class MainActivity extends Activity {
 
         android.graphics.drawable.Drawable icon = null;
         try {
-            icon = ri.loadIcon(getPackageManager());
+            icon = iconOf(ri);
         } catch (Exception ignored) {
         }
         if (icon != null) {
@@ -922,7 +932,7 @@ public class MainActivity extends Activity {
         grid.setColumnCount(cols);
 
         for (final ResolveInfo ri : apps) {
-            View tile = buildTile(ri, String.valueOf(ri.loadLabel(getPackageManager())));
+            View tile = buildTile(ri, labelOf(ri));
             grid.addView(tile, tileParams());
             if (primaryFocus == null) primaryFocus = tile;
         }
@@ -963,22 +973,54 @@ public class MainActivity extends Activity {
                 int ua = use(usage, pa);
                 int ub = use(usage, pb);
                 if (ua != ub) return ub - ua;
-                return String.valueOf(a.loadLabel(getPackageManager()))
-                        .compareToIgnoreCase(String.valueOf(b.loadLabel(getPackageManager())));
+                return labelOf(a).compareToIgnoreCase(labelOf(b));
             }
         });
         return apps;
     }
 
+    /** The app's label, decoded once. */
+    private String labelOf(ResolveInfo ri) {
+        String pkg = ri.activityInfo.packageName;
+        String cached = labelCache.get(pkg);
+        if (cached != null) return cached;
+        String label;
+        try {
+            label = String.valueOf(ri.loadLabel(getPackageManager()));
+        } catch (Exception e) {
+            label = pkg;
+        }
+        labelCache.put(pkg, label);
+        return label;
+    }
+
+    /** The app's icon, decoded once. */
+    private android.graphics.drawable.Drawable iconOf(ResolveInfo ri) {
+        String pkg = ri.activityInfo.packageName;
+        android.graphics.drawable.Drawable cached = iconCache.get(pkg);
+        if (cached != null) return cached;
+        try {
+            android.graphics.drawable.Drawable d = ri.loadIcon(getPackageManager());
+            if (d != null) iconCache.put(pkg, d);
+            return d;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     /** Records that an app was just opened, so it moves to the top. */
     private void markUsed(String pkg) {
+        long now = System.currentTimeMillis();
         try {
             getSharedPreferences("hyremote.recent", MODE_PRIVATE)
                     .edit()
-                    .putLong(pkg, System.currentTimeMillis())
+                    .putLong(pkg, now)
                     .apply();
         } catch (Exception ignored) {
         }
+        // Sorting right after opening an app must not wait for the prefs to be
+        // written and read back.
+        if (recencyMap != null) recencyMap.put(pkg, now);
     }
 
     /**
@@ -986,6 +1028,13 @@ public class MainActivity extends Activity {
      * from what this launcher saw itself.
      */
     private Map<String, Long> readRecency() {
+        long now = System.currentTimeMillis();
+        // The system keeps 90 days of history and querying it is not free.
+        // One read per minute is more than enough for an ordering, and
+        // markUsed() keeps the map current in between.
+        if (recencyMap != null && now - recencyCacheAt < 60L * 1000) {
+            return recencyMap;
+        }
         Map<String, Long> out = new HashMap<>();
         try {
             android.content.SharedPreferences sp =
@@ -1000,13 +1049,21 @@ public class MainActivity extends Activity {
             android.app.usage.UsageStatsManager usm =
                     (android.app.usage.UsageStatsManager)
                             getSystemService(Context.USAGE_STATS_SERVICE);
-            if (usm == null) return out;
+            if (usm == null) {
+                recencyMap = out;
+                recencyCacheAt = now;
+                return out;
+            }
 
             long end = System.currentTimeMillis();
             long start = end - 90L * 24 * 60 * 60 * 1000;
             List<android.app.usage.UsageStats> stats = usm.queryUsageStats(
                     android.app.usage.UsageStatsManager.INTERVAL_BEST, start, end);
-            if (stats == null) return out;
+            if (stats == null) {
+                recencyMap = out;
+                recencyCacheAt = now;
+                return out;
+            }
             for (android.app.usage.UsageStats u : stats) {
                 String pkg = u.getPackageName();
                 long last = 0;
@@ -1020,6 +1077,8 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             Log.w("HyRemote", "recency stats unavailable: " + e);
         }
+        recencyMap = out;
+        recencyCacheAt = now;
         return out;
     }
 
@@ -1052,7 +1111,7 @@ public class MainActivity extends Activity {
 
         android.graphics.drawable.Drawable icon = null;
         try {
-            icon = ri.loadIcon(getPackageManager());
+            icon = iconOf(ri);
         } catch (Exception ignored) {
         }
 
@@ -2354,8 +2413,6 @@ public class MainActivity extends Activity {
 
     private void publishAppList() {
         try {
-            PackageManager pm = getPackageManager();
-
             // Same order as the launcher grid: most recently used first, so
             // the phone's app list matches what the projector shows.
             List<ResolveInfo> all = loadApps();
@@ -2372,7 +2429,7 @@ public class MainActivity extends Activity {
                 if (pkg.equals(getPackageName())) continue;
                 if (!done.add(pkg)) continue;
 
-                String label = String.valueOf(ri.loadLabel(pm));
+                String label = labelOf(ri);
                 label = label.replace('\n', ' ').replace('\r', ' ').replace('|', '/');
 
                 Long last = recency.get(pkg);
@@ -2397,6 +2454,18 @@ public class MainActivity extends Activity {
     }
 
     private Map<String, Integer> readUsageStats() {
+        long now = System.currentTimeMillis();
+        if (usageCache != null && now - usageCacheAt < 5L * 60 * 1000) {
+            return usageCache;
+        }
+        Map<String, Integer> out = readUsageStatsNow();
+        usageCache = out;
+        usageCacheAt = now;
+        return out;
+    }
+
+    /** The real query. Users stats change slowly, so one call serves a while. */
+    private Map<String, Integer> readUsageStatsNow() {
         Map<String, Integer> out = new HashMap<>();
         try {
             android.app.usage.UsageStatsManager usm =
@@ -2426,7 +2495,7 @@ public class MainActivity extends Activity {
         File out = new File(dir, iconFileName(pkg));
         if (out.exists() && out.length() > 0) return;
         try {
-            android.graphics.drawable.Drawable d = ri.loadIcon(getPackageManager());
+            android.graphics.drawable.Drawable d = iconOf(ri);
             if (d == null) return;
             int size = 144;
             Bitmap bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
