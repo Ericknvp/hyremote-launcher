@@ -667,15 +667,24 @@ public class MainActivity extends Activity {
         return v;
     }
 
+    // One formatter, reused: the old code built two SimpleDateFormat objects
+    // every two seconds, which is pure garbage for a clock that only changes
+    // once a minute.
+    private final java.text.SimpleDateFormat clockFormat =
+            new java.text.SimpleDateFormat("HH:mm");
+    private final java.text.SimpleDateFormat dateFormat =
+            new java.text.SimpleDateFormat("EEEE d MMM", new java.util.Locale("es", "CO"));
+
     private void refreshClock() {
         if (clock != null) {
-            clock.setText(new java.text.SimpleDateFormat("HH:mm")
-                    .format(new java.util.Date()));
+            String hhmm = clockFormat.format(new java.util.Date());
+            // setText on the same string still walks the whole text layout.
+            if (!hhmm.contentEquals(clock.getText())) clock.setText(hhmm);
         }
         if (dateView != null) {
-            String d = new java.text.SimpleDateFormat("EEEE d MMM", new java.util.Locale("es", "CO"))
-                    .format(new java.util.Date());
-            dateView.setText(d.replace('.', ' ').toUpperCase());
+            String d = dateFormat.format(new java.util.Date())
+                    .replace('.', ' ').toUpperCase();
+            if (!d.contentEquals(dateView.getText())) dateView.setText(d);
         }
     }
 
@@ -2261,7 +2270,24 @@ public class MainActivity extends Activity {
     }
 
     /** The projector's own LAN IPv4, preferring the WiFi interface. */
+    private static final long STATE_TTL_MS = 2000L;
+    private String ipCache;
+    private long ipCacheAt;
+
     private String localIpv4() {
+        long now = SystemClock.elapsedRealtime();
+        if (ipCacheAt != 0 && now - ipCacheAt < STATE_TTL_MS) return ipCache;
+        ipCache = localIpv4Now();
+        ipCacheAt = now;
+        return ipCache;
+    }
+
+    /**
+     * Enumerating interfaces is a syscall per interface and the ticker calls
+     * this every two seconds, from the poll and from the QR card. The address
+     * changes once, when WiFi associates.
+     */
+    private String localIpv4Now() {
         try {
             Enumeration<NetworkInterface> ifaces = NetworkInterface.getNetworkInterfaces();
             String fallback = null;
@@ -2286,7 +2312,15 @@ public class MainActivity extends Activity {
 
     /** Finds the port the bridge actually bound by probing localhost. */
     private int detectBridgePort() {
+        // The port does not move while the app runs. Trying it first turns the
+        // usual case into one request instead of a scan of sixteen, which the
+        // poll repeats every two seconds.
+        if (bridgePort >= PORT_MIN && bridgePort <= PORT_MAX
+                && "pong".equals(http("http://127.0.0.1:" + bridgePort + "/ping"))) {
+            return bridgePort;
+        }
         for (int p = PORT_MIN; p <= PORT_MAX; p++) {
+            if (p == bridgePort) continue;
             if ("pong".equals(http("http://127.0.0.1:" + p + "/ping"))) return p;
         }
         return 0;
@@ -2368,19 +2402,37 @@ public class MainActivity extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final int port = detectBridgePort();
-                final long t0 = System.currentTimeMillis();
-                final String pong = port == 0 ? "" : http("http://127.0.0.1:" + port + "/ping");
-                final long ms = System.currentTimeMillis() - t0;
-                final String focus = port == 0 ? "" : http("http://127.0.0.1:" + port + "/focus");
-                final String status = "pong".equals(pong)
-                        ? http("http://127.0.0.1:" + port + "/status") : "";
+                // One ping in the normal case: the port we already know is
+                // tried first, and the range is scanned only when it fails.
+                int port = bridgePort;
+                long t0 = System.currentTimeMillis();
+                String pong = port == 0 ? "" : http("http://127.0.0.1:" + port + "/ping");
+                long ms = System.currentTimeMillis() - t0;
+                if (!"pong".equals(pong)) {
+                    port = detectBridgePort();
+                    if (port == 0) {
+                        pong = "";
+                        ms = 0;
+                    } else {
+                        t0 = System.currentTimeMillis();
+                        pong = http("http://127.0.0.1:" + port + "/ping");
+                        ms = System.currentTimeMillis() - t0;
+                    }
+                }
+
+                final int foundPort = port;
+                final String foundPong = pong;
+                final long foundMs = ms;
+                final String focus = foundPort == 0 ? ""
+                        : http("http://127.0.0.1:" + foundPort + "/focus");
+                final String status = "pong".equals(foundPong)
+                        ? http("http://127.0.0.1:" + foundPort + "/status") : "";
 
                 handler.post(new Runnable() {
                     @Override
                     public void run() {
-                        if (port != 0) bridgePort = port;
-                        applyBridgeState(pong, ms, focus, status);
+                        if (foundPort != 0) bridgePort = foundPort;
+                        applyBridgeState(foundPong, foundMs, focus, status);
                         updateConnectCard();
                     }
                 });
