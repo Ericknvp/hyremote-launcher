@@ -34,6 +34,11 @@ Launcher y control remoto para el proyector Android **HY320** (y compatibles).
 > las unidades que probamos normalmente ya viene activa y no hay que tocar
 > nada.
 
+## Verificación del archivo
+
+- Tamaño: **251.113 bytes**
+- SHA-256: `26E3392D6BBCFFCA62FE2BEFBB2BA72EB7B8856FFFB88045D39C3977331074A0`
+
 ## Otros botones
 
 | Botón | Qué abre |
