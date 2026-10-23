@@ -16,23 +16,19 @@ $ROOT = Split-Path -Parent $MyInvocation.MyCommand.Path
 $OUT  = Join-Path $ROOT "build"
 $SRC  = Join-Path $ROOT "src"
 $RES  = Join-Path $ROOT "res"
-$AST  = Join-Path $ROOT "assets"
+$AST  = Join-Path $OUT "assets"
 $GEN  = Join-Path $OUT "gen"
-
-# The boot receiver ships the bridge scripts inside the APK and writes them
-# out on first boot.
-if (-not (Test-Path $AST)) { New-Item -ItemType Directory -Path $AST -Force | Out-Null }
-foreach ($s in @("serve.sh", "boot.sh", "handler.sh", "listapps.sh", "buildapps.sh", "launch.sh")) {
-    # Force LF endings. Android's shell chokes on CRLF: "\r" ends up inside
-    # tokens, which silently breaks `case` patterns and "inaccessible" errors.
-    $text = [System.IO.File]::ReadAllText((Join-Path $ROOT $s))
-    $text = $text -replace "`r`n", "`n"
-    [System.IO.File]::WriteAllText((Join-Path $AST $s), $text,
-        (New-Object System.Text.UTF8Encoding $false))
-}
 
 Remove-Item $OUT -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $OUT, $GEN, "$OUT\classes", "$OUT\dex" -Force | Out-Null
+
+# The app hosts the web page itself. There are no shell scripts to ship
+# anymore: the old /data/local/tmp fallback could never write that directory
+# from an app uid. Stage only the self-contained page, so the legacy .sh
+# files and the 400 KB source logo stay out of the APK.
+$WWW = Join-Path $AST "www"
+New-Item -ItemType Directory -Path $WWW -Force | Out-Null
+Copy-Item (Join-Path $ROOT "www\index.html") (Join-Path $WWW "index.html") -Force
 
 Write-Host "[1/6] Compiling resources..." -ForegroundColor Cyan
 $flat = Join-Path $OUT "res.zip"
@@ -100,7 +96,7 @@ if (-not (Test-Path $ks)) {
 $aligned = Join-Path $OUT "aligned.apk"
 & "$BT\zipalign.exe" -f 4 $apk $aligned
 
-$final = Join-Path $ROOT "hyremote-fase0.apk"
+$final = Join-Path $ROOT "hyremote-1.1.apk"
 & "$BT\apksigner.bat" sign `
     --ks $ks `
     --ks-pass pass:hyremote `
