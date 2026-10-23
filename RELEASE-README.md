@@ -9,7 +9,7 @@ Launcher y control remoto para el proyector Android **HY320** (y compatibles).
   no hay nada que configurar.
 - **Ya no necesita PC ni `setup.ps1`.** El servidor HTTP vive dentro del APK y
   las teclas salen por el ADB local del propio proyector (`127.0.0.1:5555`),
-  que en el HY320 viene activo de fábrica.
+  que en las unidades HY320 que probamos viene activo.
 
 ## Cómo instalarlo en el proyector
 
@@ -31,7 +31,8 @@ Launcher y control remoto para el proyector Android **HY320** (y compatibles).
 > **Nota:** si tu unidad tiene la depuración por red apagada, actívala una vez
 > en *Ajustes → Opciones de desarrollador → Depuración por red*. Si aparece
 > el diálogo **"¿Permitir depuración?"**, acéptalo con el control físico. En
-> el HY320 normalmente ya viene activa y no hay que tocar nada.
+> las unidades que probamos normalmente ya viene activa y no hay que tocar
+> nada.
 
 ## Otros botones
 

@@ -24,10 +24,10 @@ publica el QR con la IP real del proyector.
 
 **Cómo se inyectan las teclas.** Android 13 no deja que una app normal pulse
 teclas en otras apps. La app usa el **ADB local** del propio proyector
-(`127.0.0.1:5555`), que en el HY320 viene activo de fábrica. No hace falta PC,
-cable ni root: es el mismo canal que usa `adb shell input` desde una
-computadora, pero iniciado desde el proyector. Si el equipo tiene la
-depuración por red apagada, se activa una vez en *Ajustes → Opciones de
+(`127.0.0.1:5555`), que en las unidades HY320 que probamos viene activo. No
+hace falta PC, cable ni root: es el mismo canal que usa `adb shell input`
+desde una computadora, pero iniciado desde el proyector. Si la unidad tiene
+la depuración por red apagada, se activa una vez en *Ajustes → Opciones de
 desarrollador → Depuración por red*; si aparece el diálogo **"¿Permitir
 depuración?"**, se acepta una vez con el control físico.
 
@@ -330,7 +330,8 @@ boot). Las siguientes veces aplica los cambios sin reiniciar. Después,
 > El paso 2 (puente root) es **opcional** desde la 1.1. El APK ya sirve la
 > página y usa el ADB local del proyector para las teclas. Sin ADB local ni
 > accesibilidad, la página abre y funcionan volumen, apps y abrir apps, pero
-> el D-pad/Home/Atrás no. En el HY320 el ADB local viene activo de fábrica.
+> el D-pad/Home/Atrás no. En las unidades HY320 que probamos el ADB local
+> viene activo; si la tuya no, se activa una vez como se explica arriba.
 
 Si tocaste `handler.sh`, `serve.sh` o `boot.sh`, esos scripts ya no son el
 camino principal: el servidor es `HttpServerLite.java`. Siguen siendo
