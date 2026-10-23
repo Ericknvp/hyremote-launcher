@@ -154,9 +154,14 @@ final class LocalAdb {
             Socket socket = new Socket();
             try {
                 socket.connect(new InetSocketAddress(host, PORT), 800);
-                socket.setSoTimeout(15000);
+                // The first connection shows Android's "Allow debugging?"
+                // dialog. Give the user time to pick up the physical remote;
+                // 15 s was too short and the host gave up before the tap.
+                socket.setSoTimeout(120000);
                 socket.setTcpNoDelay(true);
                 handshake(ctx, socket);
+                // Shell commands should not hang for two minutes.
+                socket.setSoTimeout(15000);
                 return socket;
             } catch (Exception e) {
                 close(socket);
@@ -212,16 +217,23 @@ final class LocalAdb {
 
             if (p.cmd == A_AUTH) {
                 if (p.arg0 == AUTH_TOKEN) {
-                    if (!sentSignature) {
+                    if (sentPublicKey) {
+                        // adbd accepted the public key (the user tapped
+                        // Allow) and sends a fresh token so the host proves
+                        // it owns the private key. Signing this token is what
+                        // finally produces A_CNXN; without it the handshake
+                        // times out just after the prompt is accepted.
+                        byte[] sig = signToken(ctx, p.data);
+                        writePacket(out, A_AUTH, AUTH_SIGNATURE, 0, sig);
+                        Log.i(TAG, "adb key approved; token signed");
+                    } else if (!sentSignature) {
                         byte[] sig = signToken(ctx, p.data);
                         writePacket(out, A_AUTH, AUTH_SIGNATURE, 0, sig);
                         sentSignature = true;
-                    } else if (!sentPublicKey) {
+                    } else {
                         writePacket(out, A_AUTH, AUTH_PUBLIC_KEY, 0, publicKeyPayload(ctx));
                         sentPublicKey = true;
                         Log.i(TAG, "adb key sent; accept the debugging prompt on the projector");
-                    } else {
-                        throw new IOException("adb rejected the key");
                     }
                 } else {
                     // A device-side AUTH that is not a token is a request
