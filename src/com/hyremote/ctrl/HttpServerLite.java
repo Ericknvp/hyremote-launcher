@@ -335,21 +335,36 @@ public class HttpServerLite {
     private byte[] index() {
         byte[] cached = indexCache;
         if (cached != null) return cached;
+        // The build stages the page as assets/index.html because aapt2 on
+        // Windows turns a subdirectory into "www\index.html", which
+        // AssetManager cannot open. Keep the old path as a fallback for APKs
+        // built before that fix.
+        InputStream in = null;
         try {
-            InputStream in = ctx.getAssets().open("www/index.html");
+            in = ctx.getAssets().open("index.html");
+        } catch (Exception first) {
             try {
-                ByteArrayOutputStream out = new ByteArrayOutputStream();
-                byte[] buf = new byte[8192];
-                int n;
-                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-                indexCache = out.toByteArray();
-                return indexCache;
-            } finally {
-                in.close();
+                in = ctx.getAssets().open("www/index.html");
+            } catch (Exception second) {
+                Log.e(TAG, "cannot read index.html from assets", second);
+                return null;
             }
+        }
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            indexCache = out.toByteArray();
+            return indexCache;
         } catch (Exception e) {
-            Log.e(TAG, "cannot read www/index.html from assets", e);
+            Log.e(TAG, "cannot read index.html from assets", e);
             return null;
+        } finally {
+            try {
+                in.close();
+            } catch (Exception ignored) {
+            }
         }
     }
 

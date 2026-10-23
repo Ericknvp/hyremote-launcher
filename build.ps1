@@ -20,15 +20,17 @@ $AST  = Join-Path $OUT "assets"
 $GEN  = Join-Path $OUT "gen"
 
 Remove-Item $OUT -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Path $OUT, $GEN, "$OUT\classes", "$OUT\dex" -Force | Out-Null
+New-Item -ItemType Directory -Path $OUT, $GEN, "$OUT\classes", "$OUT\dex", $AST -Force | Out-Null
 
 # The app hosts the web page itself. There are no shell scripts to ship
 # anymore: the old /data/local/tmp fallback could never write that directory
 # from an app uid. Stage only the self-contained page, so the legacy .sh
 # files and the 400 KB source logo stay out of the APK.
-$WWW = Join-Path $AST "www"
-New-Item -ItemType Directory -Path $WWW -Force | Out-Null
-Copy-Item (Join-Path $ROOT "www\index.html") (Join-Path $WWW "index.html") -Force
+#
+# Keep the asset at the root of assets/. aapt2 on Windows records a
+# subdirectory as "www\index.html" (backslash), and AssetManager then cannot
+# find "www/index.html" at runtime.
+Copy-Item (Join-Path $ROOT "www\index.html") (Join-Path $AST "index.html") -Force
 
 Write-Host "[1/6] Compiling resources..." -ForegroundColor Cyan
 $flat = Join-Path $OUT "res.zip"
