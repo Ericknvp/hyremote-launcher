@@ -118,18 +118,24 @@ public class HttpServerLite {
         acceptThread = new Thread(new Runnable() {
             @Override
             public void run() {
-                while (running) {
-                    try {
-                        final Socket client = serverSocket.accept();
-                        pool.submit(new Runnable() {
-                            @Override
-                            public void run() {
-                                handle(client);
-                            }
-                        });
-                    } catch (IOException e) {
-                        if (running) Log.w(TAG, "accept failed: " + e);
+                try {
+                    while (running) {
+                        try {
+                            final Socket client = serverSocket.accept();
+                            pool.submit(new Runnable() {
+                                @Override
+                                public void run() {
+                                    handle(client);
+                                }
+                            });
+                        } catch (IOException e) {
+                            if (running) Log.w(TAG, "accept failed: " + e);
+                        }
                     }
+                } finally {
+                    // If the accept loop dies unexpectedly, let the watchdog
+                    // see a stopped server and bind a fresh socket.
+                    running = false;
                 }
             }
         }, "hyremote-http");
