@@ -5,6 +5,7 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
@@ -14,16 +15,14 @@ import android.util.Log;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Keeps the HTTP remote alive and shows the ongoing notification.
  *
- * The server now lives in this process (HttpServerLite), not in a shell script
- * under /data/local/tmp. That is what makes a plain sideload work: an app
- * cannot write /data/local/tmp on Android, so the old fallback could never
- * start. If the optional root bridge from setup.ps1 is already serving, this
- * service stays out of the way and lets it own the port.
+ * The server itself lives in HttpServerLite and is owned by the process, so
+ * both the activity and this service can ask for it without racing for the
+ * port. If the optional root bridge from setup.ps1 is already serving, the
+ * in-app server stays out of the way and lets it own the port.
  */
 public class RemoteService extends Service {
 
@@ -34,10 +33,24 @@ public class RemoteService extends Service {
     public static final int PORT_MIN = HttpServerLite.PORT_MIN;
     public static final int PORT_MAX = HttpServerLite.PORT_MAX;
 
-    private final AtomicBoolean starting = new AtomicBoolean(false);
-
-    private volatile HttpServerLite server;
-    private long nextAttemptAt = 0;
+    /**
+     * Starts the service from the activity or a boot receiver. This never
+     * throws: a firmware that rejects the foreground service must not prevent
+     * the activity from bootstrapping the server by itself.
+     */
+    public static void start(Context ctx) {
+        if (ctx == null) return;
+        Intent svc = new Intent(ctx, RemoteService.class);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ctx.startForegroundService(svc);
+            } else {
+                ctx.startService(svc);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "service start failed: " + e);
+        }
+    }
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -47,63 +60,54 @@ public class RemoteService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        createChannel();
-        startForegroundCompat();
-        ensureServer();
-        startWatchdog();
 
-        // Warm up the local adbd connection. On the first run adbd may show
-        // its "Allow debugging?" dialog; doing it now means the prompt appears
-        // while the user is looking at the projector, not on the first key
-        // press from the phone.
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                LocalAdb.available(RemoteService.this);
-            }
-        }, "adb-warmup").start();
+        // Bind the port before the notification and before any UI. If the
+        // foreground service is rejected on an unknown firmware, the activity
+        // still owns a live server and the QR still works.
+        HttpServerLite.ensure(this);
+
+        try {
+            createChannel();
+            startForegroundCompat();
+        } catch (Throwable t) {
+            Log.e(TAG, "foreground notification failed", t);
+        }
+
+        startWatchdog();
+        warmUpAdb();
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        ensureServer();
+        HttpServerLite.ensure(this);
         return START_STICKY;
     }
 
     /**
-     * Starts the in-app server unless the root bridge (installed by setup.ps1)
-     * is already up. Runs off the main thread because both the port probe and
-     * the bind are network operations.
+     * Opens the ADB authorization window once, after the activity has had a
+     * chance to claim HOME with a short probe. That keeps the "Allow
+     * debugging?" prompt from covering the first frame of the launcher and
+     * from blocking the first-run home switch.
      */
-    private void ensureServer() {
-        if (!starting.compareAndSet(false, true)) return;
-
-        new Thread(new Runnable() {
+    private void warmUpAdb() {
+        Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
-                    HttpServerLite current = server;
-                    if (current != null && current.isRunning()) return;
-
-                    if (HttpServerLite.shellBridgeUp()) {
-                        Log.i(TAG, "root bridge is serving; app server stays off");
-                        return;
-                    }
-                    if (System.currentTimeMillis() < nextAttemptAt) return;
-
-                    HttpServerLite s = new HttpServerLite(RemoteService.this);
-                    s.start();
-                    server = s;
-                    Log.i(TAG, "app server listening on port " + s.getPort());
-                } catch (Exception e) {
-                    Log.e(TAG, "server start failed", e);
-                    // Do not spin on a port range that is temporarily busy.
-                    nextAttemptAt = System.currentTimeMillis() + 10000;
-                } finally {
-                    starting.set(false);
+                    Thread.sleep(2000);
+                } catch (InterruptedException e) {
+                    return;
                 }
+                LocalAdb.warmUp(RemoteService.this);
+
+                // Some firmwares keep the HOME role but resolve the factory
+                // launcher again after a power cycle. Re-writing the choice
+                // here is what keeps the server reachable on the next boot.
+                HomeSwitcher.reassert(RemoteService.this);
             }
-        }, "server-start").start();
+        }, "adb-warmup");
+        t.setDaemon(true);
+        t.start();
     }
 
     /** Re-checks the listener periodically; Android does not restart us on its own. */
@@ -117,8 +121,9 @@ public class RemoteService extends Service {
                     } catch (InterruptedException e) {
                         return;
                     }
-                    HttpServerLite current = server;
-                    if (current == null || !current.isRunning()) ensureServer();
+                    if (HttpServerLite.current() == null) {
+                        HttpServerLite.ensure(RemoteService.this);
+                    }
                 }
             }
         }, "server-watchdog");
@@ -147,9 +152,9 @@ public class RemoteService extends Service {
 
     @Override
     public void onDestroy() {
-        HttpServerLite current = server;
-        if (current != null) current.stop();
-        server = null;
+        // The listener is owned by the process, not by this instance: the
+        // activity may have started it and may still be on screen. Stopping
+        // it here used to take the QR and the port away together.
         super.onDestroy();
     }
 
@@ -185,6 +190,7 @@ public class RemoteService extends Service {
     private void createChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
         NotificationManager nm = getSystemService(NotificationManager.class);
+        if (nm == null) return;
         if (nm.getNotificationChannel(CHANNEL_ID) != null) return;
         NotificationChannel ch = new NotificationChannel(
                 CHANNEL_ID, "HyRemote", NotificationManager.IMPORTANCE_LOW);

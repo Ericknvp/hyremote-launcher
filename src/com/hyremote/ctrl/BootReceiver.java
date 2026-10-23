@@ -6,13 +6,17 @@ import android.content.Intent;
 import android.util.Log;
 
 /**
- * Starts the in-app remote after the projector boots.
+ * Starts the in-app remote after the projector boots or the APK is updated.
  *
  * The old receiver copied shell scripts into /data/local/tmp/hyremote. That
  * directory is owned by the shell user on Android 13 and an app cannot create
  * or write it, so the copy failed and the fallback bridge never started. The
- * HTTP server now lives in RemoteService itself, so there is nothing to
- * install: start the service and it binds the port.
+ * HTTP server now lives in the process, so there is nothing to install: start
+ * the service and it binds the port.
+ *
+ * Android still requires the app to be opened once after a sideload before it
+ * leaves the "stopped" state. That single launch is unavoidable; after it,
+ * these actions keep the control alive across reboots and updates.
  */
 public class BootReceiver extends BroadcastReceiver {
 
@@ -20,49 +24,45 @@ public class BootReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context context, Intent intent) {
-        if (intent == null || !Intent.ACTION_BOOT_COMPLETED.equals(intent.getAction())) return;
-        Log.i(TAG, "boot received");
+        if (intent == null) return;
+        String action = intent.getAction();
+        if (!handles(action)) return;
+        Log.i(TAG, "received " + action);
 
-        Intent svc = new Intent(context, RemoteService.class);
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            context.startForegroundService(svc);
-        } else {
-            context.startService(svc);
-        }
-        Log.i(TAG, "service requested");
+        RemoteService.start(context);
 
-        // Launch the launcher directly after boot. On this projector firmware
-        // the system sits on the "Smart projector" boot screen and never
-        // auto-starts the HOME activity, so the user had to press the home
-        // button. Starting it here makes the projector land on the launcher
-        // immediately after boot, with no button press needed.
+        // After an update there is nothing to put on screen: the user is
+        // probably watching something. Only boot brings the launcher forward.
+        if (Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)) return;
+
+        // On this projector firmware the system sits on the "Smart projector"
+        // boot screen and never auto-starts the HOME activity, so the user had
+        // to press the home button. Starting it here makes the projector land
+        // on the launcher immediately after boot.
         //
         // Only when we ARE the home app: if the user put the stock launcher
         // back, HyRemote must not jump on top of it at every boot.
-        if (isDefaultHome(context)) {
+        if (HomeSwitcher.isHome(context) || HomeSwitcher.claimed(context)) {
             Intent home = new Intent(context, MainActivity.class);
             home.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                     | Intent.FLAG_ACTIVITY_CLEAR_TOP
                     | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-            context.startActivity(home);
-            Log.i(TAG, "launcher started");
+            try {
+                context.startActivity(home);
+                Log.i(TAG, "launcher started");
+            } catch (Exception e) {
+                Log.w(TAG, "could not start the launcher: " + e);
+            }
         } else {
             Log.i(TAG, "not the home app, staying out of the way");
         }
     }
 
-    /** True when this app is the one the system uses as the home screen. */
-    private boolean isDefaultHome(Context ctx) {
-        try {
-            if (ctx == null) return false;
-            Intent home = new Intent(Intent.ACTION_MAIN)
-                    .addCategory(Intent.CATEGORY_HOME);
-            android.content.pm.ResolveInfo ri =
-                    ctx.getPackageManager().resolveActivity(home, 0);
-            return ri != null && ri.activityInfo != null
-                    && ctx.getPackageName().equals(ri.activityInfo.packageName);
-        } catch (Exception e) {
-            return false;
-        }
+    private static boolean handles(String action) {
+        if (action == null) return false;
+        return Intent.ACTION_BOOT_COMPLETED.equals(action)
+                || Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)
+                || "android.intent.action.QUICKBOOT_POWERON".equals(action)
+                || "com.htc.intent.action.QUICKBOOT_POWERON".equals(action);
     }
 }
