@@ -2249,12 +2249,14 @@ public class MainActivity extends Activity {
                 final String pong = port == 0 ? "" : http("http://127.0.0.1:" + port + "/ping");
                 final long ms = System.currentTimeMillis() - t0;
                 final String focus = port == 0 ? "" : http("http://127.0.0.1:" + port + "/focus");
+                final String status = "pong".equals(pong)
+                        ? http("http://127.0.0.1:" + port + "/status") : "";
 
                 handler.post(new Runnable() {
                     @Override
                     public void run() {
                         if (port != 0) bridgePort = port;
-                        applyBridgeState(pong, ms, focus);
+                        applyBridgeState(pong, ms, focus, status);
                         updateConnectCard();
                     }
                 });
@@ -2263,7 +2265,7 @@ public class MainActivity extends Activity {
         }, "bridge-poll").start();
     }
 
-    private void applyBridgeState(String pong, long ms, String focus) {
+    private void applyBridgeState(String pong, long ms, String focus, String status) {
         // Whatever is in the foreground counts as used, even if it was opened
         // with the physical remote: that is what fills the RECIENTES row.
         if (focus != null && !focus.isEmpty()
@@ -2281,9 +2283,22 @@ public class MainActivity extends Activity {
             statusDot.setBackground(oval(up ? LIVE : WARN));
             if (up != wasUp) pulse(statusDot);
         }
+        // "accessibility" means Home/Back work but D-pad does not; "basic"
+        // means no key injection at all. Show that instead of a green
+        // "En línea" that would lie about the buttons. The root bridge's
+        // status has no mode field, which means it has full control.
+        boolean partial = status != null
+                && (status.contains("\"mode\":\"basic\"")
+                    || status.contains("\"mode\":\"accessibility\""));
         if (statusLabel != null) {
-            statusLabel.setText(up ? "En línea · " + ms + " ms" : "Sin conexión");
-            statusLabel.setTextColor(up ? INK : WARN);
+            if (!up) {
+                statusLabel.setText("Sin conexión");
+            } else if (partial) {
+                statusLabel.setText("En línea · control parcial");
+            } else {
+                statusLabel.setText("En línea · " + ms + " ms");
+            }
+            statusLabel.setTextColor(up && !partial ? INK : WARN);
         }
     }
 

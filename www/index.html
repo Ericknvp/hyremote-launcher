@@ -751,6 +751,23 @@ document.addEventListener('touchend', function (e) {
 
 document.addEventListener('dblclick', function (e) { e.preventDefault(); }, { passive: false });
 
+// The server reports whether key injection is available. "basic" means the
+// page works but the D-pad cannot reach other apps; tell the user instead of
+// showing a green "En línea" that lies. A missing mode is the old root
+// bridge, which always has full control.
+let controlMode = 'full';
+
+async function refreshMode() {
+  try {
+    const txt = await (await fetch('/status')).text();
+    if (txt.indexOf('"mode":"basic"') >= 0) controlMode = 'basic';
+    else if (txt.indexOf('"mode":"accessibility"') >= 0) controlMode = 'partial';
+    else controlMode = 'full';
+  } catch (e) {
+    controlMode = 'full';
+  }
+}
+
 async function ping() {
   try {
     const t0 = performance.now();
@@ -758,9 +775,19 @@ async function ping() {
     const txt = await r.text();
     if (txt.includes('pong')) {
       const ms = Math.round(performance.now() - t0);
-      statusEl.className = 'link live';
-      statusText.textContent = 'En línea';
-      latEl.innerHTML = 'Latencia <b>' + ms + ' ms</b>';
+      if (controlMode === 'basic') {
+        statusEl.className = 'link down';
+        statusText.textContent = 'En línea · sin teclas';
+        latEl.innerHTML = 'Activa Depuración por red en el proyector';
+      } else if (controlMode === 'partial') {
+        statusEl.className = 'link down';
+        statusText.textContent = 'En línea · parcial';
+        latEl.innerHTML = 'El D-pad requiere Depuración por red';
+      } else {
+        statusEl.className = 'link live';
+        statusText.textContent = 'En línea';
+        latEl.innerHTML = 'Latencia <b>' + ms + ' ms</b>';
+      }
     } else { throw 0; }
   } catch (e) {
     statusEl.className = 'link down';
@@ -768,8 +795,10 @@ async function ping() {
     latEl.innerHTML = 'Revisa que el servidor esté activo';
   }
 }
+refreshMode();
 ping();
 setInterval(ping, 5000);
+setInterval(refreshMode, 10000);
 
 // Volume can change from the physical remote too, so keep polling it.
 setInterval(refreshVolume, 4000);
