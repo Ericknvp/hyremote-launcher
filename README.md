@@ -601,6 +601,29 @@ arranque.
 Con las dos cosas arregladas, en frío: el bridge está escuchando 1 s después
 del boot y el launcher en pantalla ~15 s después.
 
+### Saber de quién es la demora
+
+El arranque tiene tres esperas distintas y conviene no confundirlas: el
+firmware tarda en entregar `BOOT_COMPLETED`, el sistema tarda en crear el
+proceso, o la app tarda en pintar. Desde la 1.2.1 cada arranque deja las tres
+en el log:
+
+```powershell
+adb logcat -d -s HyRemoteBoot HyRemote
+```
+
+- `received android.intent.action.BOOT_COMPLETED` — cuándo el sistema entregó
+  el aviso. Si el reloj del proyector ya llevaba mucho encendido, la demora es
+  del firmware y ningún cambio en la app la quita.
+- `onCreate terminó a los N ms` — cuánto costó armar la vista.
+- `primer frame a los N ms del proceso` — cuánto tardó en haber algo en
+  pantalla desde que el sistema creó el proceso.
+
+Los milisegundos absolutos dependen del proyector. Lo útil es comparar el
+mismo aparato antes y después: si `onCreate` se acerca al primer frame, el
+costo estaba en la vista; si el primer frame es mucho mayor, el peso está en
+cargar el proceso (dex, escaneo de paquetes) y no en el código del launcher.
+
 ## Desinstalar
 
 Para dejar el proyector como salió de fábrica:
