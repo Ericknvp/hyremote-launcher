@@ -206,20 +206,24 @@ public class MainActivity extends Activity {
 
         hideStatusBar();
 
-        // Keep the bridge (or its fallback) alive from the moment the launcher
-        // is up, instead of waiting for a reboot. On a projector that never
-        // ran setup.ps1 the scripts are written here, so the same APK works
-        // on a fresh device with nothing but a sideload.
-        try {
-            java.io.File dir = new java.io.File(BootReceiver.RUNTIME_DIR);
-            if (!dir.exists()) dir.mkdirs();
-            BootReceiver.installScripts(this, dir);
-            startService(new Intent(this, RemoteService.class));
-        } catch (Exception ignored) {
-        }
+        // Keep the in-app server alive from the moment the launcher is up,
+        // instead of waiting for a reboot. There is no /data/local/tmp step
+        // anymore: HttpServerLite binds the port in this process, so a fresh
+        // sideload works without a PC and without root.
+        startRemoteService();
 
         askForNetworkName();
         offerToBecomeHome();
+    }
+
+    /** Starts RemoteService with the right API for the running Android version. */
+    private void startRemoteService() {
+        Intent svc = new Intent(this, RemoteService.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(svc);
+        } else {
+            startService(svc);
+        }
     }
 
     private LayerDrawable buildBackdrop() {
@@ -1064,7 +1068,7 @@ public class MainActivity extends Activity {
             @Override
             public void run() {
                 try {
-                    startService(new Intent(MainActivity.this, RemoteService.class));
+                    startRemoteService();
                 } catch (Exception ignored) {
                 }
                 toast("Bridge reiniciado");

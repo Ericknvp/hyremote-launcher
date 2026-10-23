@@ -5,41 +5,24 @@ import android.content.Context;
 import android.content.Intent;
 import android.util.Log;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.io.OutputStream;
-
 /**
- * Starts the bridge when the projector boots, with no ADB involved.
+ * Starts the in-app remote after the projector boots.
  *
- * Root is deliberately NOT used. /system/xbin/su is root:shell with mode 4110,
- * so the shell group can execute it but cannot read it, and the exec fails from
- * an app process. Worse, the app has no SHELL permission as a fallback. Since
- * /data/local/tmp/hyremote is world-writable and already holds the scripts
- * after the first launch, writing them straight from Java is enough.
+ * The old receiver copied shell scripts into /data/local/tmp/hyremote. That
+ * directory is owned by the shell user on Android 13 and an app cannot create
+ * or write it, so the copy failed and the fallback bridge never started. The
+ * HTTP server now lives in RemoteService itself, so there is nothing to
+ * install: start the service and it binds the port.
  */
 public class BootReceiver extends BroadcastReceiver {
 
     private static final String TAG = "HyRemoteBoot";
-    private static final String DIR = "/data/local/tmp/hyremote";
-    public static final String RUNTIME_DIR = DIR;
-    private static final String SYS_DIR = "/system/etc/hyremote";
 
     @Override
     public void onReceive(Context context, Intent intent) {
         if (intent == null || !Intent.ACTION_BOOT_COMPLETED.equals(intent.getAction())) return;
         Log.i(TAG, "boot received");
 
-        File dir = new File(DIR);
-        if (!dir.exists()) dir.mkdirs();
-
-        installScripts(context, dir);
-        Log.i(TAG, "scripts installed");
-
-        // Starting the bridge is RemoteService's job. A receiver cannot: its
-        // child processes are killed when the broadcast ends, which is why the
-        // bridge never came up after a reboot.
         Intent svc = new Intent(context, RemoteService.class);
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             context.startForegroundService(svc);
@@ -81,45 +64,5 @@ public class BootReceiver extends BroadcastReceiver {
         } catch (Exception e) {
             return false;
         }
-    }
-
-    /**
-     * Copies the bridge scripts out of the APK onto the device.
-     *
-     * Only a fallback. Once setup.ps1 has run, /system/etc/hyremote is the
-     * authoritative copy and init runs the bridge from there. Writing the APK
-     * copy over it anyway would let an old bundled script silently replace a
-     * newer one on /system, which is exactly the kind of drift that makes a
-     * "fix is deployed but nothing changed" bug.
-     *
-     * It is also what makes a fresh projector work with nothing but the APK:
-     * the launcher calls this on start, so the fallback bridge has its scripts
-     * even before the device has ever been rebooted.
-     */
-    public static void installScripts(Context context, File dir) {
-        if (new File(SYS_DIR).isDirectory()) {
-            Log.i(TAG, "system bridge present, skipping APK script install");
-            return;
-        }
-        String[] names = {"serve.sh", "boot.sh", "handler.sh", "listapps.sh", "buildapps.sh",
-                "launch.sh"};
-        for (String n : names) {
-            File out = new File(dir, n);
-            try {
-                copy(context.getAssets().open(n), out);
-                out.setExecutable(true, false);
-            } catch (Exception e) {
-                Log.e(TAG, "install failed " + n, e);
-            }
-        }
-    }
-
-    private static void copy(InputStream in, File out) throws Exception {
-        OutputStream os = new FileOutputStream(out);
-        byte[] buf = new byte[4096];
-        int n;
-        while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
-        os.close();
-        in.close();
     }
 }

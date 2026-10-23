@@ -17,34 +17,26 @@ import java.net.Socket;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Keeps the bridge alive and shows the ongoing notification.
+ * Keeps the HTTP remote alive and shows the ongoing notification.
  *
- * The port itself normally belongs to the root-owned service declared in
- * /system/etc/init/hyremote.rc, which starts early in boot and is restarted by
- * init. This class deliberately does NOT take the port away from it: a bridge
- * running as the app uid can bind port 8080 perfectly well, but every
- * `input keyevent` it issues is refused with a SecurityException, so the
- * control would answer {"ok":1} while pressing nothing. Taking a working
- * listener down is strictly worse than doing nothing.
- *
- * What is left here is a fallback: if the init service is missing (factory
- * reset wiped /system, or the app was installed without setup.ps1) the bridge
- * still comes up, just without key injection, and the UI says so.
+ * The server now lives in this process (HttpServerLite), not in a shell script
+ * under /data/local/tmp. That is what makes a plain sideload work: an app
+ * cannot write /data/local/tmp on Android, so the old fallback could never
+ * start. If the optional root bridge from setup.ps1 is already serving, this
+ * service stays out of the way and lets it own the port.
  */
 public class RemoteService extends Service {
 
     private static final String TAG = "HyRemoteSvc";
     private static final String CHANNEL_ID = "hyremote";
-    public static final int PORT = 8080;
-    public static final int PORT_MIN = 8080;
-    public static final int PORT_MAX = 8095;
 
-    private static final String BOOT_SH = "/data/local/tmp/hyremote/boot.sh";
+    public static final int PORT = HttpServerLite.PORT_MIN;
+    public static final int PORT_MIN = HttpServerLite.PORT_MIN;
+    public static final int PORT_MAX = HttpServerLite.PORT_MAX;
 
-    /** Guarded so onCreate + onStartCommand + watchdog cannot pile up launches. */
-    private final AtomicBoolean launching = new AtomicBoolean(false);
+    private final AtomicBoolean starting = new AtomicBoolean(false);
 
-    private Process bridgeProcess;
+    private volatile HttpServerLite server;
     private long nextAttemptAt = 0;
 
     @Override
@@ -57,57 +49,64 @@ public class RemoteService extends Service {
         super.onCreate();
         createChannel();
         startForegroundCompat();
-        ensureBridge();
+        ensureServer();
         startWatchdog();
+
+        // Warm up the local adbd connection. On the first run adbd may show
+        // its "Allow debugging?" dialog; doing it now means the prompt appears
+        // while the user is looking at the projector, not on the first key
+        // press from the phone.
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                LocalAdb.available(RemoteService.this);
+            }
+        }, "adb-warmup").start();
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        ensureBridge();
+        ensureServer();
         return START_STICKY;
     }
 
     /**
-     * Starts the shell bridge only when nothing is already serving the port,
-     * and only after any previous attempt has had time to fail.
-     *
-     * The port probe is a socket connect, and Android 13 throws
-     * NetworkOnMainThreadException for that on the main thread - which kills
-     * the process and takes the launcher down with it. Everything here runs
-     * on a worker thread for that reason.
+     * Starts the in-app server unless the root bridge (installed by setup.ps1)
+     * is already up. Runs off the main thread because both the port probe and
+     * the bind are network operations.
      */
-    private void ensureBridge() {
-        if (!launching.compareAndSet(false, true)) return;
+    private void ensureServer() {
+        if (!starting.compareAndSet(false, true)) return;
 
         new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
-                    if (portIsUp()) return;
-                    if (bridgeProcess != null && isAlive(bridgeProcess)) return;
+                    HttpServerLite current = server;
+                    if (current != null && current.isRunning()) return;
+
+                    if (HttpServerLite.shellBridgeUp()) {
+                        Log.i(TAG, "root bridge is serving; app server stays off");
+                        return;
+                    }
                     if (System.currentTimeMillis() < nextAttemptAt) return;
 
-                    ProcessBuilder pb = new ProcessBuilder("sh", BOOT_SH);
-                    pb.redirectErrorStream(true);
-                    bridgeProcess = pb.start();
-                    Log.i(TAG, "fallback bridge launched");
+                    HttpServerLite s = new HttpServerLite(RemoteService.this);
+                    s.start();
+                    server = s;
+                    Log.i(TAG, "app server listening on port " + s.getPort());
                 } catch (Exception e) {
-                    Log.e(TAG, "launch failed", e);
-                    // Back off, so a missing /system service does not become a
-                    // once-a-second spawn loop.
-                    nextAttemptAt = System.currentTimeMillis() + 30000;
+                    Log.e(TAG, "server start failed", e);
+                    // Do not spin on a port range that is temporarily busy.
+                    nextAttemptAt = System.currentTimeMillis() + 10000;
                 } finally {
-                    launching.set(false);
+                    starting.set(false);
                 }
             }
-        }, "bridge-launch").start();
+        }, "server-start").start();
     }
 
-    /**
-     * Re-checks the port periodically. Without this the bridge stays down for
-     * the rest of the session the moment the listener dies, because Android
-     * never calls onStartCommand again on its own.
-     */
+    /** Re-checks the listener periodically; Android does not restart us on its own. */
     private void startWatchdog() {
         Thread t = new Thread(new Runnable() {
             @Override
@@ -118,34 +117,16 @@ public class RemoteService extends Service {
                     } catch (InterruptedException e) {
                         return;
                     }
-                    ensureBridge();
+                    HttpServerLite current = server;
+                    if (current == null || !current.isRunning()) ensureServer();
                 }
             }
-        }, "bridge-watchdog");
+        }, "server-watchdog");
         t.setDaemon(true);
         t.start();
     }
 
-    /** True when something is accepting connections on a bridge port. */
-    private boolean portIsUp() {
-        for (int p = PORT_MIN; p <= PORT_MAX; p++) {
-            Socket s = new Socket();
-            try {
-                s.connect(new InetSocketAddress("127.0.0.1", p), 300);
-                return true;
-            } catch (IOException e) {
-                // try the next candidate
-            } finally {
-                try {
-                    s.close();
-                } catch (IOException ignored) {
-                }
-            }
-        }
-        return false;
-    }
-
-    /** The port the bridge is actually on, or 0 when nothing is listening. */
+    /** The port the server is actually on, or 0 when nothing is listening. */
     public static int findListeningPort() {
         for (int p = PORT_MIN; p <= PORT_MAX; p++) {
             Socket s = new Socket();
@@ -164,19 +145,11 @@ public class RemoteService extends Service {
         return 0;
     }
 
-    private static boolean isAlive(Process p) {
-        try {
-            p.exitValue();
-            return false;
-        } catch (IllegalThreadStateException e) {
-            return true;
-        }
-    }
-
     @Override
     public void onDestroy() {
-        // Deliberately not killing the bridge here: init owns it, and tearing
-        // it down would break the control for as long as the launcher is open.
+        HttpServerLite current = server;
+        if (current != null) current.stop();
+        server = null;
         super.onDestroy();
     }
 
@@ -185,7 +158,13 @@ public class RemoteService extends Service {
         PendingIntent pi = PendingIntent.getActivity(
                 this, 0, open, PendingIntent.FLAG_IMMUTABLE);
 
-        Notification n = new Notification.Builder(this, CHANNEL_ID)
+        Notification.Builder builder;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            builder = new Notification.Builder(this, CHANNEL_ID);
+        } else {
+            builder = new Notification.Builder(this);
+        }
+        Notification n = builder
                 .setContentTitle("HyRemote activo")
                 .setContentText("Control web en esta red")
                 .setSmallIcon(android.R.drawable.ic_menu_send)
@@ -193,7 +172,10 @@ public class RemoteService extends Service {
                 .setOngoing(true)
                 .build();
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        // specialUse only exists from Android 14. Passing it to older
+        // releases can make startForeground throw, so use the two-argument
+        // form there; the manifest still declares the type for 14+.
+        if (Build.VERSION.SDK_INT >= 34) {
             startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         } else {
             startForeground(1, n);
